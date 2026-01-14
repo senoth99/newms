@@ -83,14 +83,18 @@ def fetch_order_positions(href: str) -> List[Dict[str, Any]]:
     return response.json().get("rows", [])
 
 
-def fetch_assortment_name(href: str) -> Optional[str]:
+def fetch_entity(href: str) -> Dict[str, Any]:
     headers = _moysklad_headers()
     if not headers:
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
 
     response = requests.get(href, headers=headers, timeout=10)
     response.raise_for_status()
-    return response.json().get("name")
+    return response.json()
+
+
+def fetch_assortment_name(href: str) -> Optional[str]:
+    return fetch_entity(href).get("name")
 
 
 def _format_positions(positions: List[Dict[str, Any]]) -> str:
@@ -114,12 +118,34 @@ def _format_positions(positions: List[Dict[str, Any]]) -> str:
 
 
 def build_message(order: Dict[str, Any]) -> str:
-    agent = order.get("agent", {}).get("name") or "не указан"
-    state = order.get("state", {}).get("name") or "не указан"
+    agent_info = order.get("agent", {})
+    agent = agent_info.get("name")
+    agent_phone = agent_info.get("phone")
+    agent_email = agent_info.get("email")
+    agent_href = agent_info.get("meta", {}).get("href")
+    if agent_href and (not agent or not agent_phone or not agent_email):
+        agent_details = fetch_entity(agent_href)
+        agent = agent or agent_details.get("name")
+        agent_phone = agent_phone or agent_details.get("phone")
+        agent_email = agent_email or agent_details.get("email")
+    agent = agent or "не указан"
+
+    state_info = order.get("state", {})
+    state = state_info.get("name")
+    if not state:
+        state_href = state_info.get("meta", {}).get("href")
+        if state_href:
+            state = fetch_entity(state_href).get("name")
+    state = state or "не указан"
     moment = _format_datetime(order.get("moment"))
     name = order.get("name") or "без номера"
     sum_value = _format_money(order.get("sum"))
-    description = order.get("description") or "нет"
+    description = (
+        order.get("description")
+        or order.get("shipmentAddressFull", {}).get("comment")
+        or _get_attribute_value(order, "комментарий")
+        or "нет"
+    )
     order_id = order.get("id") or "не указан"
     order_link = (
         f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
@@ -134,13 +160,13 @@ def build_message(order: Dict[str, Any]) -> str:
     )
     phone = (
         order.get("phone")
-        or order.get("agent", {}).get("phone")
+        or agent_phone
         or _get_attribute_value(order, "телефон")
         or "не указан"
     )
     email = (
         order.get("email")
-        or order.get("agent", {}).get("email")
+        or agent_email
         or _get_attribute_value(order, "email")
         or "не указан"
     )
