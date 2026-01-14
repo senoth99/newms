@@ -42,6 +42,24 @@ def _get_state_name(order: Dict[str, Any]) -> str:
     return state or "не указан"
 
 
+def _get_agent_details(order: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    agent_info = order.get("agent", {})
+    agent = agent_info.get("name")
+    agent_phone = agent_info.get("phone")
+    agent_email = agent_info.get("email")
+    agent_href = agent_info.get("meta", {}).get("href")
+    if agent_href and (not agent or not agent_phone or not agent_email):
+        agent_details = fetch_entity(agent_href)
+        agent = agent or agent_details.get("name")
+        agent_phone = agent_phone or agent_details.get("phone")
+        agent_email = agent_email or agent_details.get("email")
+    return {
+        "agent": agent or "не указан",
+        "agent_phone": agent_phone,
+        "agent_email": agent_email,
+    }
+
+
 def _get_attribute_value(order: Dict[str, Any], attribute_name: str) -> Optional[Any]:
     attributes = order.get("attributes", [])
     if not isinstance(attributes, list):
@@ -61,6 +79,23 @@ def _format_attribute_money(value: Optional[Any]) -> str:
     if isinstance(value, float):
         return _format_money(int(value))
     return str(value)
+
+
+def _get_delivery_method(order: Dict[str, Any]) -> str:
+    delivery_service = order.get("shipmentAddressFull", {}).get("deliveryService")
+    shipment_method = order.get("shipmentAddressFull", {}).get("shipmentMethod")
+    delivery_method = _get_attribute_value(order, "способ доставки")
+    if not delivery_method:
+        if isinstance(delivery_service, dict):
+            delivery_method = delivery_service.get("name")
+        elif delivery_service:
+            delivery_method = str(delivery_service)
+    if not delivery_method:
+        if isinstance(shipment_method, dict):
+            delivery_method = shipment_method.get("name")
+        elif shipment_method:
+            delivery_method = str(shipment_method)
+    return delivery_method or "не указан"
 
 
 def _moysklad_headers() -> Dict[str, str]:
@@ -167,17 +202,10 @@ def _is_state_updated(event: Dict[str, Any]) -> bool:
 
 
 def build_message(order: Dict[str, Any]) -> str:
-    agent_info = order.get("agent", {})
-    agent = agent_info.get("name")
-    agent_phone = agent_info.get("phone")
-    agent_email = agent_info.get("email")
-    agent_href = agent_info.get("meta", {}).get("href")
-    if agent_href and (not agent or not agent_phone or not agent_email):
-        agent_details = fetch_entity(agent_href)
-        agent = agent or agent_details.get("name")
-        agent_phone = agent_phone or agent_details.get("phone")
-        agent_email = agent_email or agent_details.get("email")
-    agent = agent or "не указан"
+    agent_details = _get_agent_details(order)
+    agent = agent_details["agent"]
+    agent_phone = agent_details["agent_phone"]
+    agent_email = agent_details["agent_email"]
 
     state = _get_state_name(order)
     moment = _format_datetime(order.get("moment"))
@@ -212,21 +240,7 @@ def build_message(order: Dict[str, Any]) -> str:
         or _get_attribute_value(order, "email")
         or "не указан"
     )
-    delivery_service = order.get("shipmentAddressFull", {}).get("deliveryService")
-    shipment_method = order.get("shipmentAddressFull", {}).get("shipmentMethod")
-    delivery_method = _get_attribute_value(order, "способ доставки")
-    if not delivery_method:
-        if isinstance(delivery_service, dict):
-            delivery_method = delivery_service.get("name")
-        elif delivery_service:
-            delivery_method = str(delivery_service)
-    if not delivery_method:
-        if isinstance(shipment_method, dict):
-            delivery_method = shipment_method.get("name")
-        elif shipment_method:
-            delivery_method = str(shipment_method)
-    if not delivery_method:
-        delivery_method = "не указан"
+    delivery_method = _get_delivery_method(order)
     address = (
         order.get("shipmentAddress")
         or order.get("shipmentAddressFull", {}).get("address")
@@ -242,7 +256,7 @@ def build_message(order: Dict[str, Any]) -> str:
     positions_text = _format_positions(positions)
 
     return (
-        f"📦 Заказ с ({state})\n"
+        f"📦 {state}\n"
         f"ID заказа: {name}\n\n"
         f"👤 Получатель: {recipient}\n"
         f"📞 Номер телефона: {phone}\n"
@@ -260,7 +274,29 @@ def build_message(order: Dict[str, Any]) -> str:
     )
 
 
-def build_sdek_message(order: Dict[str, Any], event: Dict[str, Any]) -> str:
+def build_cdek_message(order: Dict[str, Any]) -> str:
+    agent_details = _get_agent_details(order)
+    agent = agent_details["agent"]
+    agent_phone = agent_details["agent_phone"]
+    state = _get_state_name(order)
+    name = order.get("name") or "без номера"
+    order_id = order.get("id") or "не указан"
+    order_link = (
+        f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
+        if order_id != "не указан"
+        else order.get("meta", {}).get("href")
+    ) or "нет"
+    recipient = (
+        order.get("shipmentAddressFull", {}).get("recipient")
+        or _get_attribute_value(order, "получатель")
+        or agent
+    )
+    phone = (
+        order.get("phone")
+        or agent_phone
+        or _get_attribute_value(order, "телефон")
+        or "не указан"
+    )
     address = (
         order.get("shipmentAddress")
         or order.get("shipmentAddressFull", {}).get("address")
@@ -268,18 +304,15 @@ def build_sdek_message(order: Dict[str, Any], event: Dict[str, Any]) -> str:
     )
     delivery_link = _get_attribute_value(order, "ссылка на доставку") or "не указана"
     track_number = _get_attribute_value(order, "трек-номер") or "не указан"
-    order_id = order.get("id") or order.get("name") or "не указан"
-    assembled_at = _format_datetime(
-        event.get("moment") or order.get("updated") or order.get("moment")
-    )
-    order_link = _order_link(order)
+
     return (
-        "🚚 ПЕРЕДАН В СДЕК\n"
-        f"ID заказа: {order_id}\n\n"
+        f"🚚 {state}\n"
+        f"ID заказа: {name}\n\n"
+        f"👤 Получатель: {recipient}\n"
+        f"📞 Номер телефона: {phone}\n"
         f"🏠 Адрес доставки: {address}\n"
         f"Ссылка на доставку: {delivery_link}\n"
-        f"Трек-номер: {track_number}\n\n"
-        f"Собран: {assembled_at}\n"
+        f"Трек-номер: {track_number}\n"
         f"Ссылка: {order_link}"
     )
 
@@ -322,7 +355,10 @@ async def moysklad_webhook(request: Request) -> Dict[str, Any]:
             state_name = _get_state_name(order)
             if state_name == "МСК ПРОДАЖА":
                 continue
-            message = build_message(order)
+            if state_name.casefold() == "сдек":
+                message = build_cdek_message(order)
+            else:
+                message = build_message(order)
             send_telegram_message(message)
             notified.append(order.get("name") or href)
         except requests.RequestException as exc:
