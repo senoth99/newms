@@ -74,6 +74,15 @@ def _format_datetime(value: Optional[str]) -> str:
     return parsed.strftime("%d.%m.%Y")
 
 
+def _format_datetime_with_time(value: Optional[str]) -> str:
+    if not value:
+        return "не указана"
+    parsed = _parse_datetime(value)
+    if not parsed:
+        return value
+    return parsed.strftime("%d.%m.%Y %H:%M")
+
+
 def _format_money(value: Optional[int]) -> str:
     if value is None:
         return "не указана"
@@ -534,7 +543,7 @@ def _cache_payload(orders: List[Dict[str, Any]], updated_at: Optional[str] = Non
     stats = _stats_from_orders(orders)
     return {
         "updated_at": updated,
-        "updated_at_display": _format_datetime(updated),
+        "updated_at_display": _format_datetime_with_time(updated),
         "server_msk_now_ms": int(now_msk.timestamp() * 1000),
         "server_msk_today_start_ms": int(today_start.timestamp() * 1000),
         "ttl_seconds": CACHE_TTL_SECONDS,
@@ -637,7 +646,7 @@ def _event_payload(cache: Dict[str, Any]) -> str:
     updated_at = cache.get("updated_at")
     updated_at_display = cache.get("updated_at_display")
     if updated_at and not updated_at_display:
-        updated_at_display = _format_datetime(str(updated_at))
+        updated_at_display = _format_datetime_with_time(str(updated_at))
     now_msk = _msk_now()
     server_now_ms = int(now_msk.timestamp() * 1000)
     server_today_start_ms = int(_msk_day_start(now_msk).timestamp() * 1000)
@@ -666,7 +675,7 @@ def _render_landing_page(
     stale: bool,
     has_cache: bool,
 ) -> str:
-    updated_text = _format_datetime(updated_at) if updated_at else "не обновлялось"
+    updated_text = _format_datetime_with_time(updated_at) if updated_at else "не обновлялось"
     status_text = "Данные загружаются" if not has_cache else "Данные обновлены"
     warning_block = ""
     if stale and has_cache:
@@ -829,6 +838,9 @@ def _render_landing_page(
                     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
                     gap: 18px;
                 }}
+                .grid.compact {{
+                    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                }}
                 .card {{
                     background: var(--matte-surface);
                     border-radius: 18px;
@@ -848,6 +860,82 @@ def _render_landing_page(
                 .card.kpi-alert {{
                     box-shadow: 0 0 18px rgba(57, 255, 136, 0.35);
                     animation: blink 0.175s ease-in-out 1;
+                }}
+                .card .value.small {{
+                    font-size: clamp(22px, 4vw, 30px);
+                    text-shadow: none;
+                }}
+                .card .value.small::after {{
+                    width: 28px;
+                    opacity: 0.5;
+                }}
+                .card .value.secondary {{
+                    font-size: 18px;
+                    font-weight: 600;
+                    color: rgba(247, 247, 245, 0.82);
+                    text-shadow: none;
+                }}
+                .card .meta-hint {{
+                    font-size: 11px;
+                    letter-spacing: 0.1em;
+                    text-transform: uppercase;
+                    color: var(--matte-muted);
+                }}
+                .sales-section {{
+                    margin-top: 20px;
+                }}
+                .chart-card {{
+                    background: rgba(10, 16, 13, 0.88);
+                    border-radius: 20px;
+                    border: 1px solid var(--matte-border);
+                    padding: 20px 22px 24px;
+                    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+                }}
+                .chart-header {{
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 16px;
+                }}
+                .chart-title {{
+                    font-size: 14px;
+                    letter-spacing: 0.18em;
+                    text-transform: uppercase;
+                    color: var(--matte-muted);
+                }}
+                .chart-meta {{
+                    font-size: 12px;
+                    color: rgba(247, 247, 245, 0.7);
+                }}
+                .weekly-chart {{
+                    display: grid;
+                    grid-template-columns: repeat(7, minmax(0, 1fr));
+                    gap: 14px;
+                    align-items: end;
+                    min-height: 180px;
+                }}
+                .chart-bar {{
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 6px;
+                }}
+                .chart-bar-fill {{
+                    width: 100%;
+                    border-radius: 999px 999px 12px 12px;
+                    background: linear-gradient(180deg, rgba(92, 200, 255, 0.85), rgba(76, 255, 178, 0.4));
+                    box-shadow: 0 8px 18px rgba(92, 200, 255, 0.2);
+                    min-height: 10px;
+                    transition: height 0.3s ease;
+                }}
+                .chart-bar-label {{
+                    font-size: 11px;
+                    color: rgba(247, 247, 245, 0.55);
+                    letter-spacing: 0.08em;
+                }}
+                .chart-bar-value {{
+                    font-size: 12px;
+                    color: var(--matte-white);
                 }}
                 .value {{
                     font-size: clamp(36px, 6vw, 52px);
@@ -934,6 +1022,7 @@ def _render_landing_page(
                 .orders {{
                     margin-top: 28px;
                     display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
                     gap: 22px;
                 }}
                 .order-card {{
@@ -1176,6 +1265,29 @@ def _render_landing_page(
                         <div class="label">ОТПРАВЛЕНО СДЕК</div>
                     </button>
                 </div>
+                <div class="sales-section">
+                    <div class="grid compact">
+                        <div class="card" id="daily-sales-card">
+                            <div class="label">Выручка за сутки</div>
+                            <div class="value small" id="daily-sales-sum">0 руб.</div>
+                            <div class="value secondary" id="daily-sales-count">0 заказов</div>
+                            <div class="meta-hint">Сумма и количество продаж</div>
+                        </div>
+                        <div class="card" id="weekly-sales-card">
+                            <div class="label">Выручка за 7 дней</div>
+                            <div class="value small" id="weekly-sales-sum">0 руб.</div>
+                            <div class="value secondary" id="weekly-sales-count">0 заказов</div>
+                            <div class="meta-hint">Сумма и количество продаж</div>
+                        </div>
+                    </div>
+                    <div class="chart-card">
+                        <div class="chart-header">
+                            <div class="chart-title">Продажи за неделю</div>
+                            <div class="chart-meta" id="weekly-sales-meta">Последние 7 дней</div>
+                        </div>
+                        <div class="weekly-chart" id="weekly-sales-chart"></div>
+                    </div>
+                </div>
                 <div class="filters">
                     <div class="filter-group" data-filter-group="period">
                         <span class="filter-label">Период</span>
@@ -1206,6 +1318,12 @@ def _render_landing_page(
                 const newOrdersCount = document.getElementById('new-orders-count');
                 const cdekOrdersCount = document.getElementById('cdek-orders-count');
                 const ordersList = document.getElementById('orders-list');
+                const dailySalesSum = document.getElementById('daily-sales-sum');
+                const dailySalesCount = document.getElementById('daily-sales-count');
+                const weeklySalesSum = document.getElementById('weekly-sales-sum');
+                const weeklySalesCount = document.getElementById('weekly-sales-count');
+                const weeklySalesChart = document.getElementById('weekly-sales-chart');
+                const weeklySalesMeta = document.getElementById('weekly-sales-meta');
                 const resetFilters = document.getElementById('reset-filters');
                 const periodButtons = document.querySelectorAll('[data-period]');
                 const statusButtons = document.querySelectorAll('[data-status]');
@@ -1226,6 +1344,35 @@ def _render_landing_page(
                         return `${{match[3]}}.${{match[2]}}.${{match[1]}}`;
                     }}
                     return value;
+                }};
+
+                const formatMoney = (value) => {{
+                    const formatter = new Intl.NumberFormat('ru-RU', {{
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                    }});
+                    return `${{formatter.format(value)}} руб.`;
+                }};
+
+                const formatOrderCount = (value) => {{
+                    const formatter = new Intl.NumberFormat('ru-RU');
+                    const mod10 = value % 10;
+                    const mod100 = value % 100;
+                    let suffix = 'заказов';
+                    if (mod10 === 1 && mod100 !== 11) {{
+                        suffix = 'заказ';
+                    }} else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {{
+                        suffix = 'заказа';
+                    }}
+                    return `${{formatter.format(value)}} ${{suffix}}`;
+                }};
+
+                const formatDayLabel = (ms) => {{
+                    return new Date(ms).toLocaleDateString('ru-RU', {{
+                        day: '2-digit',
+                        month: '2-digit',
+                        timeZone: 'Europe/Moscow',
+                    }});
                 }};
 
                 const getMskNowMs = () => {{
@@ -1291,6 +1438,82 @@ def _render_landing_page(
                         return orders.filter((order) => isNewOrder(order.state));
                     }}
                     return orders;
+                }};
+
+                const buildWeeklySeries = (orders) => {{
+                    const dayMs = 24 * 60 * 60 * 1000;
+                    const todayStart = getMskTodayStartMs();
+                    const startMs = todayStart - 6 * dayMs;
+                    const series = Array.from({{ length: 7 }}, (_, index) => {{
+                        const dayStart = startMs + index * dayMs;
+                        return {{
+                            label: formatDayLabel(dayStart),
+                            sum: 0,
+                            count: 0,
+                        }};
+                    }});
+                    orders.forEach((order) => {{
+                        const orderTime = order.moment_ms;
+                        if (!orderTime) return;
+                        const index = Math.floor((orderTime - startMs) / dayMs);
+                        if (index < 0 || index > 6) return;
+                        const sum = typeof order.sum === 'number' ? order.sum : 0;
+                        series[index].sum += sum;
+                        series[index].count += 1;
+                    }});
+                    return series;
+                }};
+
+                const renderWeeklyChart = (series) => {{
+                    if (!weeklySalesChart) return;
+                    if (!series.length) {{
+                        weeklySalesChart.innerHTML = '<div class="empty-state">Нет данных для графика</div>';
+                        return;
+                    }}
+                    const maxSum = Math.max(...series.map((item) => item.sum));
+                    weeklySalesChart.innerHTML = series
+                        .map((item) => {{
+                            const height = maxSum ? Math.round((item.sum / maxSum) * 100) : 0;
+                            const sumRub = item.sum / 100;
+                            return `
+                                <div class="chart-bar">
+                                    <div class="chart-bar-fill" style="height: ${height}%"></div>
+                                    <div class="chart-bar-value">${formatMoney(sumRub)}</div>
+                                    <div class="chart-bar-label">${item.label}</div>
+                                </div>
+                            `;
+                        }})
+                        .join('');
+                }};
+
+                const updateSalesStats = (payload) => {{
+                    const orders = payload.orders || [];
+                    const series = buildWeeklySeries(orders);
+                    const daily = series[series.length - 1] || {{ sum: 0, count: 0 }};
+                    const weekly = series.reduce(
+                        (acc, item) => {{
+                            acc.sum += item.sum;
+                            acc.count += item.count;
+                            return acc;
+                        }},
+                        {{ sum: 0, count: 0 }}
+                    );
+                    if (dailySalesSum) {{
+                        dailySalesSum.textContent = formatMoney(daily.sum / 100);
+                    }}
+                    if (dailySalesCount) {{
+                        dailySalesCount.textContent = formatOrderCount(daily.count);
+                    }}
+                    if (weeklySalesSum) {{
+                        weeklySalesSum.textContent = formatMoney(weekly.sum / 100);
+                    }}
+                    if (weeklySalesCount) {{
+                        weeklySalesCount.textContent = formatOrderCount(weekly.count);
+                    }}
+                    if (weeklySalesMeta) {{
+                        weeklySalesMeta.textContent = `Всего ${formatOrderCount(weekly.count)}`;
+                    }}
+                    renderWeeklyChart(series);
                 }};
 
                 const renderOrders = (orders, highlightedIds = new Set()) => {{
@@ -1410,6 +1633,7 @@ def _render_landing_page(
                     if (!payload || !payload.stats) return;
                     const previousNewCount = currentPayload.stats?.new_orders ?? 0;
                     updateKpi(payload, previousNewCount);
+                    updateSalesStats(payload);
 
                     const orders = payload.orders || [];
                     const newIds = new Set(orders.map((order) => order.id));
