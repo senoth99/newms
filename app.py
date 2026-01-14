@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
@@ -159,10 +159,17 @@ def fetch_assortment_name(href: str) -> Optional[str]:
     return fetch_entity(href).get("name")
 
 
-def fetch_customer_orders(limit: int = 100) -> List[Dict[str, Any]]:
+def _moysklad_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str, Any]]:
     headers = _moysklad_headers()
     if not headers:
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+
+    since = datetime.now(timezone.utc) - timedelta(days=max_days)
+    filter_since = f"moment>={_moysklad_datetime(since)}"
 
     orders: List[Dict[str, Any]] = []
     offset = 0
@@ -170,7 +177,12 @@ def fetch_customer_orders(limit: int = 100) -> List[Dict[str, Any]]:
         response = requests.get(
             "https://api.moysklad.ru/api/remap/1.2/entity/customerorder",
             headers=headers,
-            params={"limit": limit, "offset": offset, "expand": "state"},
+            params={
+                "limit": limit,
+                "offset": offset,
+                "expand": "state",
+                "filter": filter_since,
+            },
             timeout=10,
         )
         response.raise_for_status()
@@ -851,8 +863,8 @@ def _render_landing_page(
                     <div class="filter-group" data-filter-group="period">
                         <span class="filter-label">Период</span>
                         <button class="filter-button active" type="button" data-period="today">Сегодня</button>
+                        <button class="filter-button" type="button" data-period="three_days">3 дня</button>
                         <button class="filter-button" type="button" data-period="week">7 дней</button>
-                        <button class="filter-button" type="button" data-period="all">Всё</button>
                     </div>
                     <div class="filter-group" data-filter-group="status">
                         <span class="filter-label">Статус</span>
@@ -915,7 +927,6 @@ def _render_landing_page(
                 }};
 
                 const filterByPeriod = (orders) => {{
-                    if (activeFilters.period === 'all') return orders;
                     const now = new Date();
                     return orders.filter((order) => {{
                         if (!order.moment) return false;
@@ -928,6 +939,9 @@ def _render_landing_page(
                             );
                         }}
                         const diffDays = (now - orderDate) / (1000 * 60 * 60 * 24);
+                        if (activeFilters.period === 'three_days') {{
+                            return diffDays <= 3;
+                        }}
                         return diffDays <= 7;
                     }});
                 }};
@@ -1174,6 +1188,7 @@ async def _process_webhook_event(href: str) -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     _ensure_cache_dir()
+    await refresh_cache("startup")
     asyncio.create_task(auto_refresh_loop())
 
 
