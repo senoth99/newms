@@ -162,6 +162,45 @@ def _format_positions(positions: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _resolve_state(order: Dict[str, Any]) -> str:
+    state_info = order.get("state", {})
+    state = state_info.get("name")
+    if not state:
+        state_href = state_info.get("meta", {}).get("href")
+        if state_href:
+            state = fetch_entity(state_href).get("name")
+    return state or "не указан"
+
+
+def _order_link(order: Dict[str, Any]) -> str:
+    order_id = order.get("id")
+    return (
+        f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
+        if order_id
+        else order.get("meta", {}).get("href")
+    ) or "нет"
+
+
+def _is_state_updated(event: Dict[str, Any]) -> bool:
+    updated_fields = event.get("updatedFields")
+    def _field_contains_state(field_name: str) -> bool:
+        return "state" in field_name.casefold()
+
+    if isinstance(updated_fields, str):
+        return _field_contains_state(updated_fields)
+    if isinstance(updated_fields, list):
+        return any(
+            isinstance(field, str) and _field_contains_state(field)
+            for field in updated_fields
+        )
+    if isinstance(updated_fields, dict):
+        return any(
+            isinstance(field, str) and _field_contains_state(field)
+            for field in updated_fields.keys()
+        )
+    return False
+
+
 def build_message(order: Dict[str, Any]) -> str:
     agent_details = _get_agent_details(order)
     agent = agent_details["agent"]
