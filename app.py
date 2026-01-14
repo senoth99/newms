@@ -29,13 +29,6 @@ logger = logging.getLogger("moysklad")
 logging.basicConfig(level=logging.INFO)
 
 
-def _get_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -352,8 +345,11 @@ def build_cdek_message(order: Dict[str, Any]) -> str:
 
 
 def send_telegram_message(text: str) -> None:
-    bot_token = _get_env("TG_BOT_TOKEN")
-    chat_id = _get_env("TG_CHAT_ID")
+    bot_token = os.getenv("TG_BOT_TOKEN")
+    chat_id = os.getenv("TG_CHAT_ID")
+    if not bot_token or not chat_id:
+        logger.warning("Telegram env vars missing, skipping send")
+        return
 
     response = requests.post(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -399,7 +395,13 @@ def _cache_payload(orders: List[Dict[str, Any]], updated_at: Optional[str] = Non
 
 
 def _ensure_cache_dir() -> None:
-    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+    cache_dir = os.path.dirname(CACHE_PATH)
+    if not cache_dir:
+        return
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to ensure cache directory %s: %s", cache_dir, exc)
 
 
 def _load_cache_unlocked() -> Optional[Dict[str, Any]]:
@@ -917,6 +919,7 @@ async def _process_webhook_event(href: str) -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    _ensure_cache_dir()
     asyncio.create_task(auto_refresh_loop())
 
 
@@ -977,9 +980,9 @@ def landing() -> HTMLResponse:
 @app.post("/refresh")
 async def refresh() -> JSONResponse:
     cache = await refresh_cache("manual")
-    if cache:
-        return JSONResponse({"status": "ok", "updated_at": cache.get("updated_at")})
-    return JSONResponse({"status": "error", "updated_at": None})
+    if not cache:
+        cache = await anyio.to_thread.run_sync(read_cache)
+    return JSONResponse({"status": "ok", "updated_at": cache.get("updated_at") if cache else None})
 
 
 @app.get("/events")
