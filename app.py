@@ -1477,9 +1477,9 @@ def _render_landing_page(
                             const sumRub = item.sum / 100;
                             return `
                                 <div class="chart-bar">
-                                    <div class="chart-bar-fill" style="height: ${height}%"></div>
-                                    <div class="chart-bar-value">${formatMoney(sumRub)}</div>
-                                    <div class="chart-bar-label">${item.label}</div>
+                                    <div class="chart-bar-fill" style="height: ${{height}}%"></div>
+                                    <div class="chart-bar-value">${{formatMoney(sumRub)}}</div>
+                                    <div class="chart-bar-label">${{item.label}}</div>
                                 </div>
                             `;
                         }})
@@ -1511,7 +1511,7 @@ def _render_landing_page(
                         weeklySalesCount.textContent = formatOrderCount(weekly.count);
                     }}
                     if (weeklySalesMeta) {{
-                        weeklySalesMeta.textContent = `Всего ${formatOrderCount(weekly.count)}`;
+                        weeklySalesMeta.textContent = `Всего ${{formatOrderCount(weekly.count)}}`;
                     }}
                     renderWeeklyChart(series);
                 }};
