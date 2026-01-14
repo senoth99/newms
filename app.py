@@ -880,6 +880,7 @@ async def refresh_cache(reason: str) -> Optional[Dict[str, Any]]:
 
 
 async def auto_refresh_loop() -> None:
+    await asyncio.sleep(60)
     while True:
         try:
             cache = await anyio.to_thread.run_sync(read_cache)
