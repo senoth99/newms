@@ -474,19 +474,8 @@ def health() -> Dict[str, str]:
 
 @app.get("/", response_class=HTMLResponse)
 def landing() -> HTMLResponse:
-    error: Optional[str] = None
-    try:
-        orders = fetch_customer_orders()
-        counts = _count_orders_by_state(orders)
-    except (requests.RequestException, RuntimeError) as exc:
-        error = str(exc)
-        counts = {"new_orders": 0, "cdek_orders": 0}
-    html = _render_landing_page(
-        new_orders=counts["new_orders"],
-        cdek_orders=counts["cdek_orders"],
-        error=error,
-    )
-    return HTMLResponse(content=html)
+    html = _render_landing_page(new_orders=0, cdek_orders=0, error=None)
+    return HTMLResponse(content=html, status_code=200)
 
 
 @app.post("/webhook/moysklad")
