@@ -32,6 +32,16 @@ def _format_money(value: Optional[int]) -> str:
     return f"{value / 100:.2f}"
 
 
+def _get_state_name(order: Dict[str, Any]) -> str:
+    state_info = order.get("state", {})
+    state = state_info.get("name")
+    if not state:
+        state_href = state_info.get("meta", {}).get("href")
+        if state_href:
+            state = fetch_entity(state_href).get("name")
+    return state or "не указан"
+
+
 def _get_attribute_value(order: Dict[str, Any], attribute_name: str) -> Optional[Any]:
     attributes = order.get("attributes", [])
     if not isinstance(attributes, list):
@@ -169,7 +179,7 @@ def build_message(order: Dict[str, Any]) -> str:
         agent_email = agent_email or agent_details.get("email")
     agent = agent or "не указан"
 
-    state = _resolve_state(order)
+    state = _get_state_name(order)
     moment = _format_datetime(order.get("moment"))
     name = order.get("name") or "без номера"
     sum_value = _format_money(order.get("sum"))
@@ -179,7 +189,12 @@ def build_message(order: Dict[str, Any]) -> str:
         or _get_attribute_value(order, "комментарий")
         or "нет"
     )
-    order_link = _order_link(order)
+    order_id = order.get("id") or "не указан"
+    order_link = (
+        f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
+        if order_id != "не указан"
+        else order.get("meta", {}).get("href")
+    ) or "нет"
     recipient = (
         order.get("shipmentAddressFull", {}).get("recipient")
         or _get_attribute_value(order, "получатель")
@@ -304,13 +319,10 @@ async def moysklad_webhook(request: Request) -> Dict[str, Any]:
 
         try:
             order = fetch_order_details(href)
-            state = _resolve_state(order)
-            if state == "Собран СДЕК" and (
-                _is_state_updated(event) or event.get("updatedFields") is None
-            ):
-                message = build_sdek_message(order, event)
-            else:
-                message = build_message(order)
+            state_name = _get_state_name(order)
+            if state_name == "МСК ПРОДАЖА":
+                continue
+            message = build_message(order)
             send_telegram_message(message)
             notified.append(order.get("name") or href)
         except requests.RequestException as exc:
