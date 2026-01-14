@@ -373,14 +373,10 @@ def send_telegram_message(text: str) -> None:
 
 def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
     state_name = _get_state_name(order)
-    agent_info = order.get("agent")
-    recipient = None
-    phone = order.get("phone")
-    email = order.get("email")
-    if isinstance(agent_info, dict):
-        recipient = agent_info.get("name")
-        phone = phone or agent_info.get("phone")
-        email = email or agent_info.get("email")
+    agent_details = _get_agent_details(order)
+    recipient = agent_details.get("agent")
+    phone = order.get("phone") or agent_details.get("agent_phone")
+    email = order.get("email") or agent_details.get("agent_email")
     shipment_full = order.get("shipmentAddressFull")
     city = None
     address = None
@@ -395,6 +391,16 @@ def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
             city = shipment_address.split(",")[0].strip() or None
         if not address and isinstance(shipment_address, str):
             address = shipment_address
+    if not recipient_override:
+        recipient_override = _get_attribute_value(order, "получатель")
+    if not phone:
+        phone = _get_attribute_value(order, "телефон")
+    if not email:
+        email = _get_attribute_value(order, "email")
+    if not city:
+        city = _get_attribute_value(order, "город") or _get_attribute_value(order, "city")
+    if not address:
+        address = _get_attribute_value(order, "адрес") or _get_attribute_value(order, "адрес доставки")
     return {
         "id": order.get("id") or "",
         "name": order.get("name") or "без номера",
@@ -586,8 +592,8 @@ def _render_landing_page(
                 }}
                 body {{
                     margin: 0;
-                    background: radial-gradient(circle at top, #0f3d2e 0%, #0b0f0d 45%, #000000 100%);
-                    color: #e5e5e5;
+                    background: radial-gradient(circle at top, #4a4b4f 0%, #1f2024 50%, #0d0f12 100%);
+                    color: #f2f2f2;
                 }}
                 .container {{
                     max-width: 1200px;
@@ -603,7 +609,7 @@ def _render_landing_page(
                     text-transform: uppercase;
                 }}
                 .subtitle {{
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                     margin-bottom: 16px;
                     max-width: 680px;
                 }}
@@ -614,7 +620,7 @@ def _render_landing_page(
                     gap: 12px 24px;
                     margin-bottom: 24px;
                     font-size: 13px;
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                 }}
                 .meta span {{
                     display: inline-flex;
@@ -627,14 +633,14 @@ def _render_landing_page(
                     gap: 6px;
                     padding: 6px 12px;
                     border-radius: 999px;
-                    border: 1px solid rgba(198, 198, 198, 0.3);
-                    background: rgba(15, 61, 46, 0.4);
-                    box-shadow: 0 0 22px rgba(35, 255, 180, 0.25);
+                    border: 1px solid rgba(255, 255, 255, 0.25);
+                    background: rgba(255, 255, 255, 0.08);
+                    box-shadow: 0 0 18px rgba(255, 255, 255, 0.12);
                 }}
                 .refresh-button {{
-                    border: 1px solid rgba(198, 198, 198, 0.4);
-                    background: rgba(15, 61, 46, 0.6);
-                    color: #e5e5e5;
+                    border: 1px solid rgba(255, 255, 255, 0.28);
+                    background: rgba(255, 255, 255, 0.08);
+                    color: #f2f2f2;
                     font-weight: 600;
                     padding: 10px 18px;
                     border-radius: 999px;
@@ -646,7 +652,7 @@ def _render_landing_page(
                     cursor: progress;
                 }}
                 .refresh-button:not(:disabled):hover {{
-                    box-shadow: 0 0 24px rgba(35, 255, 180, 0.55);
+                    box-shadow: 0 0 24px rgba(255, 255, 255, 0.2);
                     transform: translateY(-1px);
                 }}
                 .grid {{
@@ -655,40 +661,40 @@ def _render_landing_page(
                     gap: 18px;
                 }}
                 .card {{
-                    background: rgba(11, 15, 13, 0.7);
+                    background: rgba(28, 29, 33, 0.85);
                     border-radius: 18px;
                     padding: 26px;
-                    box-shadow: 0 0 30px rgba(35, 255, 180, 0.2);
+                    box-shadow: 0 0 30px rgba(255, 255, 255, 0.08);
                     display: flex;
                     flex-direction: column;
                     gap: 12px;
                     cursor: pointer;
-                    border: 1px solid rgba(198, 198, 198, 0.2);
+                    border: 1px solid rgba(255, 255, 255, 0.12);
                     position: relative;
                     overflow: hidden;
                 }}
                 .card:hover {{
-                    border-color: rgba(198, 198, 198, 0.5);
+                    border-color: rgba(255, 255, 255, 0.35);
                 }}
                 .card.kpi-alert::after {{
                     content: "";
                     position: absolute;
                     inset: -2px;
                     border-radius: 20px;
-                    border: 1px solid rgba(198, 198, 198, 0.7);
-                    box-shadow: 0 0 26px rgba(35, 255, 180, 0.6);
+                    border: 1px solid rgba(255, 255, 255, 0.7);
+                    box-shadow: 0 0 24px rgba(255, 255, 255, 0.35);
                     animation: blink 0.45s ease-in-out 2;
                 }}
                 .value {{
                     font-size: clamp(36px, 6vw, 52px);
                     font-weight: 700;
-                    color: #e5e5e5;
+                    color: #f7f7f7;
                 }}
                 .label {{
                     font-size: 14px;
                     letter-spacing: 0.12em;
                     text-transform: uppercase;
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                 }}
                 .filters {{
                     margin-top: 28px;
@@ -707,25 +713,30 @@ def _render_landing_page(
                     font-size: 12px;
                     text-transform: uppercase;
                     letter-spacing: 0.12em;
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                 }}
                 .filter-button {{
-                    border: 1px solid rgba(198, 198, 198, 0.3);
-                    background: rgba(11, 15, 13, 0.7);
-                    color: #e5e5e5;
+                    border: 1px solid rgba(255, 255, 255, 0.22);
+                    background: rgba(28, 29, 33, 0.75);
+                    color: #f2f2f2;
                     padding: 8px 14px;
                     border-radius: 999px;
                     cursor: pointer;
                     font-size: 13px;
                 }}
+                .filter-button:focus,
+                .filter-button:active {{
+                    background: rgba(28, 29, 33, 0.75);
+                    outline: none;
+                }}
                 .filter-button.active {{
-                    border-color: rgba(35, 255, 180, 0.8);
-                    box-shadow: 0 0 20px rgba(35, 255, 180, 0.45);
+                    border-color: rgba(255, 255, 255, 0.6);
+                    box-shadow: 0 0 20px rgba(255, 255, 255, 0.2);
                 }}
                 .reset-button {{
-                    border: 1px solid rgba(198, 198, 198, 0.4);
+                    border: 1px solid rgba(255, 255, 255, 0.28);
                     background: transparent;
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                     padding: 8px 16px;
                     border-radius: 999px;
                     cursor: pointer;
@@ -737,18 +748,18 @@ def _render_landing_page(
                     gap: 16px;
                 }}
                 .order-card {{
-                    border: 1px solid rgba(198, 198, 198, 0.2);
+                    border: 1px solid rgba(255, 255, 255, 0.16);
                     border-radius: 18px;
                     padding: 18px 20px;
-                    background: rgba(0, 0, 0, 0.5);
+                    background: rgba(20, 21, 24, 0.7);
                     display: grid;
                     gap: 12px;
                     cursor: pointer;
                     transition: border 0.2s ease, box-shadow 0.2s ease;
                 }}
                 .order-card:hover {{
-                    border-color: rgba(198, 198, 198, 0.45);
-                    box-shadow: 0 0 28px rgba(35, 255, 180, 0.25);
+                    border-color: rgba(255, 255, 255, 0.38);
+                    box-shadow: 0 0 28px rgba(255, 255, 255, 0.16);
                 }}
                 .order-card.new-flash {{
                     animation: glow 0.5s ease-in-out 1;
@@ -773,31 +784,31 @@ def _render_landing_page(
                     border: 1px solid transparent;
                 }}
                 .status-new {{
-                    color: #9cffd6;
-                    border-color: rgba(156, 255, 214, 0.4);
+                    color: #e5f2ff;
+                    border-color: rgba(229, 242, 255, 0.4);
                 }}
                 .status-paid {{
-                    color: #23ffb4;
-                    border-color: rgba(35, 255, 180, 0.5);
+                    color: #d9f5ff;
+                    border-color: rgba(217, 245, 255, 0.45);
                 }}
                 .status-cdek {{
-                    color: #e5e5e5;
-                    border-color: rgba(229, 229, 229, 0.5);
+                    color: #f2f2f2;
+                    border-color: rgba(242, 242, 242, 0.4);
                 }}
                 .status-warning {{
-                    color: #ffd166;
-                    border-color: rgba(255, 209, 102, 0.5);
+                    color: #f3e3b0;
+                    border-color: rgba(243, 227, 176, 0.45);
                 }}
                 .status-error {{
-                    color: #ff5f5f;
-                    border-color: rgba(255, 95, 95, 0.5);
+                    color: #f3b0b0;
+                    border-color: rgba(243, 176, 176, 0.45);
                 }}
                 .order-meta {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
                     gap: 8px 16px;
                     font-size: 13px;
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                 }}
                 .order-meta span {{
                     display: block;
@@ -807,9 +818,9 @@ def _render_landing_page(
                     justify-content: flex-end;
                 }}
                 .order-link {{
-                    border: 1px solid rgba(198, 198, 198, 0.4);
-                    background: rgba(15, 61, 46, 0.5);
-                    color: #e5e5e5;
+                    border: 1px solid rgba(255, 255, 255, 0.28);
+                    background: rgba(255, 255, 255, 0.08);
+                    color: #f2f2f2;
                     padding: 8px 16px;
                     border-radius: 999px;
                     font-size: 13px;
@@ -818,7 +829,7 @@ def _render_landing_page(
                 .note {{
                     margin-top: 10px;
                     font-size: 12px;
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                     letter-spacing: 0.05em;
                     text-transform: uppercase;
                 }}
@@ -827,11 +838,11 @@ def _render_landing_page(
                     inset: 0;
                     pointer-events: none;
                     background-image:
-                        radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.12) 0, transparent 2px),
-                        radial-gradient(circle at 70% 20%, rgba(255, 255, 255, 0.08) 0, transparent 2px),
-                        radial-gradient(circle at 40% 80%, rgba(255, 255, 255, 0.1) 0, transparent 2px),
-                        radial-gradient(circle at 80% 60%, rgba(255, 255, 255, 0.07) 0, transparent 2px);
-                    opacity: 0.35;
+                        radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.18) 0, transparent 2px),
+                        radial-gradient(circle at 70% 20%, rgba(240, 240, 240, 0.15) 0, transparent 2px),
+                        radial-gradient(circle at 40% 80%, rgba(255, 255, 255, 0.16) 0, transparent 2px),
+                        radial-gradient(circle at 80% 60%, rgba(230, 230, 230, 0.12) 0, transparent 2px);
+                    opacity: 0.4;
                     mix-blend-mode: screen;
                     animation: glitter 6s ease-in-out infinite;
                 }}
@@ -840,37 +851,37 @@ def _render_landing_page(
                     position: absolute;
                     inset: 0;
                     background-image:
-                        radial-gradient(circle at 10% 50%, rgba(220, 220, 220, 0.12) 0, transparent 2px),
-                        radial-gradient(circle at 90% 40%, rgba(230, 230, 230, 0.1) 0, transparent 2px);
-                    opacity: 0.4;
+                        radial-gradient(circle at 10% 50%, rgba(255, 255, 255, 0.14) 0, transparent 2px),
+                        radial-gradient(circle at 90% 40%, rgba(245, 245, 245, 0.12) 0, transparent 2px);
+                    opacity: 0.5;
                     animation: glitter 8s ease-in-out infinite reverse;
                 }}
                 .empty-state {{
                     padding: 24px;
                     border-radius: 16px;
-                    border: 1px dashed rgba(198, 198, 198, 0.3);
+                    border: 1px dashed rgba(255, 255, 255, 0.25);
                     text-align: center;
-                    color: #c6c6c6;
+                    color: #c9c9ce;
                 }}
                 .warning {{
                     margin-top: 24px;
                     padding: 14px 18px;
                     border-radius: 14px;
-                    border: 1px solid rgba(255, 209, 102, 0.6);
-                    background: rgba(255, 209, 102, 0.12);
-                    color: #ffd166;
+                    border: 1px solid rgba(243, 227, 176, 0.5);
+                    background: rgba(243, 227, 176, 0.12);
+                    color: #f3e3b0;
                     font-size: 13px;
                 }}
                 .warning strong {{
-                    color: #ffe5a6;
+                    color: #f7efcd;
                 }}
                 .stale {{
-                    color: #ffd166;
+                    color: #f3e3b0;
                 }}
                 @keyframes glow {{
-                    0% {{ box-shadow: 0 0 0 rgba(35, 255, 180, 0.0); }}
-                    50% {{ box-shadow: 0 0 28px rgba(35, 255, 180, 0.6); }}
-                    100% {{ box-shadow: 0 0 0 rgba(35, 255, 180, 0.0); }}
+                    0% {{ box-shadow: 0 0 0 rgba(255, 255, 255, 0.0); }}
+                    50% {{ box-shadow: 0 0 28px rgba(255, 255, 255, 0.35); }}
+                    100% {{ box-shadow: 0 0 0 rgba(255, 255, 255, 0.0); }}
                 }}
                 @keyframes blink {{
                     0%, 100% {{ opacity: 1; }}
@@ -1066,11 +1077,6 @@ def _render_landing_page(
                 const applyFilters = (orders, highlightedIds) => {{
                     const filtered = filterByStatus(filterByPeriod(orders));
                     const sorted = filtered.sort((a, b) => {{
-                        const aIsNew = isNewOrder(a.state) ? 1 : 0;
-                        const bIsNew = isNewOrder(b.state) ? 1 : 0;
-                        if (aIsNew !== bIsNew) {{
-                            return bIsNew - aIsNew;
-                        }}
                         const aTime = a.moment ? new Date(a.moment).getTime() : 0;
                         const bTime = b.moment ? new Date(b.moment).getTime() : 0;
                         return bTime - aTime;
