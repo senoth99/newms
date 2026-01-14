@@ -32,6 +32,27 @@ def _format_money(value: Optional[int]) -> str:
     return f"{value / 100:.2f}"
 
 
+def _get_attribute_value(order: Dict[str, Any], attribute_name: str) -> Optional[Any]:
+    attributes = order.get("attributes", [])
+    if not isinstance(attributes, list):
+        return None
+    name_normalized = attribute_name.casefold()
+    for attribute in attributes:
+        if attribute.get("name", "").casefold() == name_normalized:
+            return attribute.get("value")
+    return None
+
+
+def _format_attribute_money(value: Optional[Any]) -> str:
+    if value is None:
+        return "не указана"
+    if isinstance(value, int):
+        return _format_money(value)
+    if isinstance(value, float):
+        return _format_money(int(value))
+    return str(value)
+
+
 def _moysklad_headers() -> Dict[str, str]:
     token = os.getenv("MS_TOKEN")
     basic_token = os.getenv("MS_BASIC_TOKEN")
@@ -52,6 +73,29 @@ def fetch_order_details(href: str) -> Dict[str, Any]:
     return response.json()
 
 
+def fetch_order_positions(href: str) -> List[Dict[str, Any]]:
+    headers = _moysklad_headers()
+    if not headers:
+        raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+
+    response = requests.get(href, headers=headers, timeout=10)
+    response.raise_for_status()
+    return response.json().get("rows", [])
+
+
+def _format_positions(positions: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for position in positions:
+        assortment = position.get("assortment", {})
+        name = assortment.get("name") or "Товар"
+        quantity = position.get("quantity") or 0
+        price = _format_money(position.get("price"))
+        lines.append(f"{name} - {quantity} шт. - {price} руб.")
+    if not lines:
+        return "нет позиций"
+    return "\n".join(lines)
+
+
 def build_message(order: Dict[str, Any]) -> str:
     agent = order.get("agent", {}).get("name") or "не указан"
     state = order.get("state", {}).get("name") or "не указан"
@@ -60,15 +104,65 @@ def build_message(order: Dict[str, Any]) -> str:
     sum_value = _format_money(order.get("sum"))
     description = order.get("description") or "нет"
     href = order.get("meta", {}).get("href") or "нет"
+    site = order.get("source", {}).get("name") or _get_attribute_value(order, "сайт") or "не указан"
+    order_id = order.get("name") or order.get("id") or "не указан"
+    recipient = (
+        order.get("shipmentAddressFull", {}).get("recipient")
+        or _get_attribute_value(order, "получатель")
+        or agent
+    )
+    phone = (
+        order.get("phone")
+        or order.get("agent", {}).get("phone")
+        or _get_attribute_value(order, "телефон")
+        or "не указан"
+    )
+    email = (
+        order.get("email")
+        or order.get("agent", {}).get("email")
+        or _get_attribute_value(order, "email")
+        or "не указан"
+    )
+    telegram = _get_attribute_value(order, "telegram") or _get_attribute_value(order, "телеграм") or "не указан"
+    delivery_method = (
+        _get_attribute_value(order, "способ доставки")
+        or order.get("shipmentAddressFull", {}).get("comment")
+        or "не указан"
+    )
+    address = (
+        order.get("shipmentAddress")
+        or order.get("shipmentAddressFull", {}).get("address")
+        or "не указан"
+    )
+    delivery_link = _get_attribute_value(order, "ссылка на доставку") or "не указана"
+    track_number = _get_attribute_value(order, "трек-номер") or "не указан"
+    delivery_cost = _format_attribute_money(_get_attribute_value(order, "стоимость доставки"))
+    promo_code = _get_attribute_value(order, "промокод") or "не указан"
+
+    positions_meta = order.get("positions", {}).get("meta", {}).get("href")
+    positions = order.get("positions", {}).get("rows") or []
+    if positions_meta and not positions:
+        positions = fetch_order_positions(positions_meta)
+    positions_text = _format_positions(positions)
 
     return (
-        "СОЗДАН НОВЫЙ ЗАКАЗ\n\n"
-        f"Номер: {name}\n"
-        f"Дата: {moment}\n"
-        f"Контрагент: {agent}\n"
-        f"Сумма: {sum_value}\n"
-        f"Статус: {state}\n"
+        f"📦 Заказ с \"{site}\" ({state})\n"
+        f"ID заказа: {order_id}\n\n"
+        f"👤 Получатель: {recipient}\n"
+        f"📞 Номер телефона: {phone}\n"
+        f"📧 Email: {email}\n"
+        f"Telegram (telegram): {telegram}\n"
+        f"Способ доставки: {delivery_method}\n\n"
+        f"🏠 Адрес доставки: {address}\n"
+        f"Ссылка на доставку: {delivery_link}\n"
+        f"Трек-номер: {track_number}\n\n"
+        "Состав заказа:\n"
+        f"{positions_text}\n\n"
+        f"Стоимость доставки: {delivery_cost} руб.\n\n"
+        f"Промокод: {promo_code}\n\n"
+        f"Сумма заказа: {sum_value} руб.\n\n"
         f"Комментарий: {description}\n"
+        f"Создан: {moment}\n"
         f"Ссылка: {href}"
     )
 
