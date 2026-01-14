@@ -1,18 +1,32 @@
+import asyncio
+import json
+import logging
 import os
+import threading
+from datetime import datetime, timezone
 from html import escape
-from datetime import datetime
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
 
+import anyio
 import requests
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 
 app = FastAPI(title="MoySklad Telegram Notifier")
 
 
-EXCLUDED_NEW_ORDER_STATES = {"Собран СДЕК", "МСК ПРОДАЖА", "Возврат", "Обмен"}
-CDEK_ORDER_STATE = "Собран СДЕК"
+CACHE_PATH = "/data/orders_cache.json"
+CACHE_TTL_SECONDS = 300
+
+CACHE_LOCK = threading.Lock()
+REFRESH_LOCK = asyncio.Lock()
+SUBSCRIBERS_LOCK = asyncio.Lock()
+SUBSCRIBERS: List[asyncio.Queue[str]] = []
+
+logger = logging.getLogger("moysklad")
+logging.basicConfig(level=logging.INFO)
 
 
 def _get_env(name: str) -> str:
@@ -20,6 +34,10 @@ def _get_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _format_datetime(value: Optional[str]) -> str:
@@ -191,16 +209,6 @@ def _format_positions(positions: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _resolve_state(order: Dict[str, Any]) -> str:
-    state_info = order.get("state", {})
-    state = state_info.get("name")
-    if not state:
-        state_href = state_info.get("meta", {}).get("href")
-        if state_href:
-            state = fetch_entity(state_href).get("name")
-    return state or "не указан"
-
-
 def _order_link(order: Dict[str, Any]) -> str:
     order_id = order.get("id")
     return (
@@ -210,28 +218,21 @@ def _order_link(order: Dict[str, Any]) -> str:
     ) or "нет"
 
 
-def _is_state_updated(event: Dict[str, Any]) -> bool:
-    updated_fields = event.get("updatedFields")
-    def _field_contains_state(field_name: str) -> bool:
-        return "state" in field_name.casefold()
-
-    if isinstance(updated_fields, str):
-        return _field_contains_state(updated_fields)
-    if isinstance(updated_fields, list):
-        return any(
-            isinstance(field, str) and _field_contains_state(field)
-            for field in updated_fields
-        )
-    if isinstance(updated_fields, dict):
-        return any(
-            isinstance(field, str) and _field_contains_state(field)
-            for field in updated_fields.keys()
-        )
-    return False
+def is_cdek_state(state: str) -> bool:
+    return "сдек" in state.casefold()
 
 
-def _is_cdek_state(state_name: str) -> bool:
-    return "сдек" in state_name.casefold()
+def is_new_order(state: str) -> bool:
+    state_value = state.casefold()
+    return any(
+        word in state_value
+        for word in [
+            "нов",
+            "принят",
+            "оплачен",
+            "обработ",
+        ]
+    )
 
 
 def build_message(order: Dict[str, Any]) -> str:
@@ -362,30 +363,144 @@ def send_telegram_message(text: str) -> None:
     response.raise_for_status()
 
 
-def _count_orders_by_state(orders: List[Dict[str, Any]]) -> Dict[str, int]:
-    counts = {"new_orders": 0, "cdek_orders": 0}
-    for order in orders:
-        state_name = _get_state_name(order)
-        if _is_cdek_state(state_name):
-            counts["cdek_orders"] += 1
-            continue
-        if state_name not in EXCLUDED_NEW_ORDER_STATES:
-            counts["new_orders"] += 1
-    return counts
-
-
-def _order_row(order: Dict[str, Any]) -> Dict[str, str]:
-    name = order.get("name") or "без номера"
-    state = _get_state_name(order)
-    moment = _format_datetime(order.get("moment"))
-    total = _format_money(order.get("sum"))
-    order_link = _order_link(order)
+def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
+    state_name = _get_state_name(order)
     return {
-        "name": escape(str(name)),
-        "state": escape(str(state)),
-        "moment": escape(str(moment)),
-        "total": escape(str(total)),
-        "link": escape(str(order_link)),
+        "id": order.get("id") or "",
+        "name": order.get("name") or "без номера",
+        "state": state_name,
+        "moment": order.get("moment"),
+        "sum": order.get("sum"),
+        "link": _order_link(order),
+    }
+
+
+def _stats_from_orders(orders: List[Dict[str, Any]]) -> Dict[str, int]:
+    stats = {"new_orders": 0, "cdek_orders": 0, "total_orders": len(orders)}
+    for order in orders:
+        state = str(order.get("state") or "")
+        if is_cdek_state(state):
+            stats["cdek_orders"] += 1
+            continue
+        if is_new_order(state):
+            stats["new_orders"] += 1
+    return stats
+
+
+def _cache_payload(orders: List[Dict[str, Any]], updated_at: Optional[str] = None) -> Dict[str, Any]:
+    updated = updated_at or _now_iso()
+    stats = _stats_from_orders(orders)
+    return {
+        "updated_at": updated,
+        "ttl_seconds": CACHE_TTL_SECONDS,
+        "stats": stats,
+        "orders": orders,
+    }
+
+
+def _ensure_cache_dir() -> None:
+    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+
+
+def _load_cache_unlocked() -> Optional[Dict[str, Any]]:
+    try:
+        with open(CACHE_PATH, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("Failed to decode cache: %s", exc)
+        return None
+
+
+def _write_cache_unlocked(cache: Dict[str, Any]) -> None:
+    _ensure_cache_dir()
+    with NamedTemporaryFile("w", delete=False, dir=os.path.dirname(CACHE_PATH), encoding="utf-8") as handle:
+        json.dump(cache, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temp_name = handle.name
+    os.replace(temp_name, CACHE_PATH)
+
+
+def read_cache() -> Optional[Dict[str, Any]]:
+    with CACHE_LOCK:
+        return _load_cache_unlocked()
+
+
+def write_cache(cache: Dict[str, Any]) -> None:
+    with CACHE_LOCK:
+        _write_cache_unlocked(cache)
+
+
+def update_cache_with_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
+    with CACHE_LOCK:
+        cache = _load_cache_unlocked() or _cache_payload([])
+        orders = cache.get("orders", [])
+        order_id = order_payload.get("id")
+        updated_orders: List[Dict[str, Any]] = []
+        replaced = False
+        for existing in orders:
+            if order_id and existing.get("id") == order_id:
+                updated_orders.append(order_payload)
+                replaced = True
+            else:
+                updated_orders.append(existing)
+        if not replaced:
+            updated_orders.append(order_payload)
+        cache = _cache_payload(updated_orders)
+        _write_cache_unlocked(cache)
+    return cache
+
+
+def build_cache_from_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+    serialized = [_serialize_order(order) for order in orders]
+    return _cache_payload(serialized)
+
+
+def cache_is_stale(cache: Dict[str, Any]) -> bool:
+    updated_at = cache.get("updated_at")
+    ttl = cache.get("ttl_seconds", CACHE_TTL_SECONDS)
+    if not updated_at:
+        return True
+    try:
+        parsed = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    now = datetime.now(timezone.utc)
+    return (now - parsed).total_seconds() > int(ttl)
+
+
+def _log_stats(cache: Dict[str, Any]) -> None:
+    stats = cache.get("stats", {})
+    updated_at = cache.get("updated_at")
+    logger.info(
+        "[STATS] total=%s new=%s cdek=%s updated_at=%s",
+        stats.get("total_orders"),
+        stats.get("new_orders"),
+        stats.get("cdek_orders"),
+        updated_at,
+    )
+
+
+def _event_payload(cache: Dict[str, Any]) -> str:
+    payload = {
+        "updated_at": cache.get("updated_at"),
+        "ttl_seconds": cache.get("ttl_seconds", CACHE_TTL_SECONDS),
+        "stats": cache.get("stats", {}),
+        "orders": cache.get("orders", []),
+        "stale": cache_is_stale(cache),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _order_row_cached(order: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "name": escape(str(order.get("name") or "без номера")),
+        "state": escape(str(order.get("state") or "не указан")),
+        "moment": escape(_format_datetime(order.get("moment"))),
+        "total": escape(_format_money(order.get("sum"))),
+        "link": escape(str(order.get("link") or "нет")),
     }
 
 
@@ -414,13 +529,24 @@ def _render_landing_page(
     cdek_orders: int,
     new_order_rows: List[Dict[str, str]],
     cdek_order_rows: List[Dict[str, str]],
-    error: Optional[str],
+    updated_at: Optional[str],
+    stale: bool,
+    has_cache: bool,
 ) -> str:
-    error_block = ""
-    if error:
-        error_block = f"""
-        <div class="error">
-            Не удалось получить данные: {escape(error)}
+    updated_text = _format_datetime(updated_at) if updated_at else "не обновлялось"
+    status_text = "Данные загружаются" if not has_cache else "Данные обновлены"
+    warning_block = ""
+    if stale and has_cache:
+        warning_block = """
+        <div class="warning">
+            Данные устарели. Нажмите «Обновить», чтобы подтянуть актуальные значения.
+        </div>
+        """
+    empty_block = ""
+    if not has_cache:
+        empty_block = """
+        <div class="warning">
+            Данные загружаются. Попробуйте обновить позже.
         </div>
         """
     return f"""
@@ -451,7 +577,33 @@ def _render_landing_page(
                 }}
                 .subtitle {{
                     color: #c6c6c6;
+                    margin-bottom: 8px;
+                }}
+                .meta {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    align-items: center;
+                    gap: 16px;
                     margin-bottom: 32px;
+                    font-size: 14px;
+                }}
+                .meta span {{
+                    display: inline-flex;
+                    gap: 6px;
+                    align-items: center;
+                }}
+                .refresh-button {{
+                    border: none;
+                    background: #c6c6c6;
+                    color: #013220;
+                    font-weight: 600;
+                    padding: 10px 16px;
+                    border-radius: 999px;
+                    cursor: pointer;
+                }}
+                .refresh-button:disabled {{
+                    opacity: 0.6;
+                    cursor: progress;
                 }}
                 .grid {{
                     display: grid;
@@ -525,11 +677,11 @@ def _render_landing_page(
                     text-align: center;
                     font-style: italic;
                 }}
-                .error {{
+                .warning {{
                     margin-top: 24px;
                     padding: 16px 20px;
                     border-radius: 12px;
-                    background: #c6c6c6;
+                    background: #ffd166;
                     color: #013220;
                     font-size: 14px;
                 }}
@@ -541,13 +693,18 @@ def _render_landing_page(
                 <div class="subtitle">
                     Здесь отображаются новые заказы и заказы, собранные в СДЭК.
                 </div>
+                <div class="meta">
+                    <span>Обновлено: <strong id="updated-at">{escape(updated_text)}</strong></span>
+                    <span>Статус: <strong id="status-text">{escape(status_text)}</strong></span>
+                    <button class="refresh-button" id="refresh-button" type="button">Обновить</button>
+                </div>
                 <div class="grid">
                     <button class="card" type="button" data-target="new-orders-table">
-                        <div class="value">{new_orders}</div>
+                        <div class="value" id="new-orders-count">{new_orders}</div>
                         <div class="label">НОВЫЕ ЗАКАЗЫ</div>
                     </button>
                     <button class="card" type="button" data-target="cdek-orders-table">
-                        <div class="value">{cdek_orders}</div>
+                        <div class="value" id="cdek-orders-count">{cdek_orders}</div>
                         <div class="label">ОТПРАВЛЕНО СДЕК</div>
                     </button>
                 </div>
@@ -563,7 +720,7 @@ def _render_landing_page(
                                     <th>Сумма</th>
                                 </tr>
                             </thead>
-                            <tbody>
+                            <tbody id="new-orders-body">
                                 {_render_table_rows(new_order_rows)}
                             </tbody>
                         </table>
@@ -579,16 +736,74 @@ def _render_landing_page(
                                     <th>Сумма</th>
                                 </tr>
                             </thead>
-                            <tbody>
+                            <tbody id="cdek-orders-body">
                                 {_render_table_rows(cdek_order_rows)}
                             </tbody>
                         </table>
                     </div>
                 </div>
-                {error_block}
+                {warning_block}
+                {empty_block}
             </div>
             <script>
                 const cards = document.querySelectorAll('[data-target]');
+                const refreshButton = document.getElementById('refresh-button');
+                const statusText = document.getElementById('status-text');
+                const updatedAt = document.getElementById('updated-at');
+                const newOrdersCount = document.getElementById('new-orders-count');
+                const cdekOrdersCount = document.getElementById('cdek-orders-count');
+                const newOrdersBody = document.getElementById('new-orders-body');
+                const cdekOrdersBody = document.getElementById('cdek-orders-body');
+
+                const renderRows = (rows) => {{
+                    if (!rows.length) {{
+                        return '<tr class="empty-row"><td colspan="4">Нет заказов</td></tr>';
+                    }}
+                    return rows.map((row) => `
+                        <tr>
+                            <td><a href="${{row.link}}" target="_blank" rel="noreferrer">${{row.name}}</a></td>
+                            <td>${{row.state}}</td>
+                            <td>${{row.moment}}</td>
+                            <td>${{row.total}}</td>
+                        </tr>
+                    `).join('');
+                }};
+
+                const updateFromPayload = (payload) => {{
+                    if (!payload || !payload.stats) return;
+                    newOrdersCount.textContent = payload.stats.new_orders ?? 0;
+                    cdekOrdersCount.textContent = payload.stats.cdek_orders ?? 0;
+                    if (payload.updated_at) {{
+                        updatedAt.textContent = payload.updated_at.replace('T', ' ').split('.')[0];
+                    }}
+                    statusText.textContent = payload.stale ? 'Данные устарели' : 'Данные обновлены';
+                    const orders = payload.orders || [];
+                    const newOrders = orders.filter((order) => {{
+                        const state = (order.state || '').toLowerCase();
+                        return state.includes('сдек') === false && (
+                            state.includes('нов') ||
+                            state.includes('принят') ||
+                            state.includes('оплачен') ||
+                            state.includes('обработ')
+                        );
+                    }});
+                    const cdekOrders = orders.filter((order) => (order.state || '').toLowerCase().includes('сдек'));
+                    newOrdersBody.innerHTML = renderRows(newOrders.map((order) => ({{
+                        name: order.name || 'без номера',
+                        state: order.state || 'не указан',
+                        moment: order.moment ? order.moment.replace('T', ' ').split('.')[0] : 'не указана',
+                        total: order.sum ? (order.sum / 100).toFixed(2) : 'не указана',
+                        link: order.link || '#',
+                    }})));
+                    cdekOrdersBody.innerHTML = renderRows(cdekOrders.map((order) => ({{
+                        name: order.name || 'без номера',
+                        state: order.state || 'не указан',
+                        moment: order.moment ? order.moment.replace('T', ' ').split('.')[0] : 'не указана',
+                        total: order.sum ? (order.sum / 100).toFixed(2) : 'не указана',
+                        link: order.link || '#',
+                    }})));
+                }};
+
                 cards.forEach((card) => {{
                     card.addEventListener('click', () => {{
                         const targetId = card.getAttribute('data-target');
@@ -604,10 +819,105 @@ def _render_landing_page(
                         }}
                     }});
                 }});
+
+                refreshButton.addEventListener('click', async () => {{
+                    refreshButton.disabled = true;
+                    statusText.textContent = 'Обновляем...';
+                    try {{
+                        const response = await fetch('/refresh', {{ method: 'POST' }});
+                        const payload = await response.json();
+                        if (payload.updated_at) {{
+                            updatedAt.textContent = payload.updated_at.replace('T', ' ').split('.')[0];
+                        }}
+                        statusText.textContent = 'Данные обновлены';
+                    }} catch (error) {{
+                        statusText.textContent = 'Ошибка обновления';
+                    }} finally {{
+                        refreshButton.disabled = false;
+                    }}
+                }});
+
+                const eventSource = new EventSource('/events');
+                eventSource.onmessage = (event) => {{
+                    try {{
+                        const payload = JSON.parse(event.data);
+                        updateFromPayload(payload);
+                    }} catch (error) {{
+                        console.warn('Failed to parse event', error);
+                    }}
+                }};
             </script>
         </body>
     </html>
     """
+
+
+async def broadcast_event(cache: Dict[str, Any]) -> None:
+    payload = _event_payload(cache)
+    async with SUBSCRIBERS_LOCK:
+        for queue in list(SUBSCRIBERS):
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                logger.warning("Dropping SSE event for slow client")
+
+
+async def refresh_cache(reason: str) -> Optional[Dict[str, Any]]:
+    async with REFRESH_LOCK:
+        try:
+            orders = await anyio.to_thread.run_sync(fetch_customer_orders)
+            cache = await anyio.to_thread.run_sync(build_cache_from_orders, orders)
+            await anyio.to_thread.run_sync(write_cache, cache)
+            _log_stats(cache)
+            await broadcast_event(cache)
+            logger.info("Cache refreshed: %s", reason)
+            return cache
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to refresh cache: %s", exc)
+            return None
+
+
+async def auto_refresh_loop() -> None:
+    while True:
+        try:
+            cache = await anyio.to_thread.run_sync(read_cache)
+            if cache is None or cache_is_stale(cache):
+                await refresh_cache("ttl")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Auto refresh failed: %s", exc)
+        await asyncio.sleep(60)
+
+
+async def _process_webhook_event(href: str) -> None:
+    try:
+        order = await anyio.to_thread.run_sync(fetch_order_details, href)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch order details: %s", exc)
+        return
+
+    cache: Optional[Dict[str, Any]] = None
+    try:
+        order_payload = await anyio.to_thread.run_sync(_serialize_order, order)
+        cache = await anyio.to_thread.run_sync(update_cache_with_order, order_payload)
+        _log_stats(cache)
+        await broadcast_event(cache)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to update cache for webhook: %s", exc)
+
+    try:
+        state_name = await anyio.to_thread.run_sync(_get_state_name, order)
+        if is_cdek_state(state_name):
+            message = await anyio.to_thread.run_sync(build_cdek_message, order)
+        else:
+            message = await anyio.to_thread.run_sync(build_message, order)
+        await anyio.to_thread.run_sync(send_telegram_message, message)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to send Telegram notification: %s", exc)
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    asyncio.create_task(auto_refresh_loop())
 
 
 @app.get("/health")
@@ -617,49 +927,98 @@ def health() -> Dict[str, str]:
 
 @app.get("/", response_class=HTMLResponse)
 def landing() -> HTMLResponse:
-    error: Optional[str] = None
     new_order_rows: List[Dict[str, str]] = []
     cdek_order_rows: List[Dict[str, str]] = []
     counts = {"new_orders": 0, "cdek_orders": 0}
+    updated_at: Optional[str] = None
+    stale = False
+    has_cache = False
+
     try:
-        orders = fetch_customer_orders()
-        counts = _count_orders_by_state(orders)
-        new_orders = [
-            _order_row(order)
-            for order in orders
-            if _get_state_name(order) not in EXCLUDED_NEW_ORDER_STATES
-            and not _is_cdek_state(_get_state_name(order))
-        ]
-        cdek_orders = [
-            _order_row(order)
-            for order in orders
-            if _is_cdek_state(_get_state_name(order))
-        ]
-        new_order_rows = sorted(new_orders, key=lambda row: row["moment"], reverse=True)
-        cdek_order_rows = sorted(cdek_orders, key=lambda row: row["moment"], reverse=True)
-    except requests.RequestException as exc:
-        error = str(exc)
-    except RuntimeError as exc:
-        error = str(exc)
+        cache = read_cache()
+        if cache:
+            has_cache = True
+            updated_at = cache.get("updated_at")
+            stale = cache_is_stale(cache)
+            stats = cache.get("stats", {})
+            counts = {
+                "new_orders": int(stats.get("new_orders", 0)),
+                "cdek_orders": int(stats.get("cdek_orders", 0)),
+            }
+            orders = cache.get("orders", [])
+            new_orders = [
+                _order_row_cached(order)
+                for order in orders
+                if is_new_order(str(order.get("state") or ""))
+                and not is_cdek_state(str(order.get("state") or ""))
+            ]
+            cdek_orders = [
+                _order_row_cached(order)
+                for order in orders
+                if is_cdek_state(str(order.get("state") or ""))
+            ]
+            new_order_rows = sorted(new_orders, key=lambda row: row["moment"], reverse=True)
+            cdek_order_rows = sorted(cdek_orders, key=lambda row: row["moment"], reverse=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read cache: %s", exc)
 
     html = _render_landing_page(
         new_orders=counts["new_orders"],
         cdek_orders=counts["cdek_orders"],
         new_order_rows=new_order_rows,
         cdek_order_rows=cdek_order_rows,
-        error=error,
+        updated_at=updated_at,
+        stale=stale,
+        has_cache=has_cache,
     )
     return HTMLResponse(content=html, status_code=200)
 
 
-@app.post("/webhook/moysklad")
-async def moysklad_webhook(request: Request) -> Dict[str, Any]:
-    payload = await request.json()
-    events: List[Dict[str, Any]] = payload.get("events", [])
-    if not events:
-        raise HTTPException(status_code=400, detail="No events in payload")
+@app.post("/refresh")
+async def refresh() -> JSONResponse:
+    cache = await refresh_cache("manual")
+    if cache:
+        return JSONResponse({"status": "ok", "updated_at": cache.get("updated_at")})
+    return JSONResponse({"status": "error", "updated_at": None})
 
-    notified: List[str] = []
+
+@app.get("/events")
+async def events() -> StreamingResponse:
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=10)
+    async with SUBSCRIBERS_LOCK:
+        SUBSCRIBERS.append(queue)
+
+    async def event_stream() -> Any:
+        try:
+            cache = await anyio.to_thread.run_sync(read_cache)
+            if cache:
+                yield f"data: {_event_payload(cache)}\n\n"
+            while True:
+                payload = await queue.get()
+                yield f"data: {payload}\n\n"
+        except asyncio.CancelledError:
+            raise
+        finally:
+            async with SUBSCRIBERS_LOCK:
+                if queue in SUBSCRIBERS:
+                    SUBSCRIBERS.remove(queue)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/webhook/moysklad")
+async def moysklad_webhook(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Invalid webhook payload: %s", exc)
+        return JSONResponse({"status": "ok"})
+
+    events: List[Dict[str, Any]] = payload.get("events", []) if isinstance(payload, dict) else []
+    if not events:
+        logger.info("Webhook received without events")
+        return JSONResponse({"status": "ok"})
+
     for event in events:
         meta = event.get("meta", {})
         if meta.get("type") != "customerorder":
@@ -667,24 +1026,6 @@ async def moysklad_webhook(request: Request) -> Dict[str, Any]:
         href = meta.get("href")
         if not href:
             continue
+        asyncio.create_task(_process_webhook_event(href))
 
-        try:
-            order = fetch_order_details(href)
-            state_name = _get_state_name(order)
-            if state_name == "МСК ПРОДАЖА":
-                continue
-            if _is_cdek_state(state_name):
-                message = build_cdek_message(order)
-            else:
-                message = build_message(order)
-            send_telegram_message(message)
-            notified.append(order.get("name") or href)
-        except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    if not notified:
-        return {"status": "ignored"}
-
-    return {"status": "sent", "orders": notified}
+    return JSONResponse({"status": "ok"})
