@@ -119,9 +119,12 @@ def moysklad_headers() -> Dict[str, str]:
     token = os.getenv("MS_TOKEN")
     basic_token = os.getenv("MS_BASIC_TOKEN")
     if basic_token:
+        logger.info("Using MoySklad Basic auth")
         return {"Authorization": f"Basic {basic_token}"}
     if token:
+        logger.info("Using MoySklad Bearer token auth")
         return {"Authorization": f"Bearer {token}"}
+    logger.warning("MoySklad auth token is missing")
     return {}
 
 
@@ -140,15 +143,23 @@ def order_matches_store(order: Dict[str, Any], store_href: Optional[str]) -> boo
         return True
     store_info = order.get("store")
     if not isinstance(store_info, dict):
+        logger.warning("Order %s has no store info; skipping strict store filter", order.get("id"))
+        return True
+    href = store_info.get("meta", {}).get("href") or store_info.get("href")
+    if not href:
+        logger.warning("Order %s store href missing; skipping strict store filter", order.get("id"))
+        return True
+    if href != store_href:
+        logger.info("Order %s skipped by store filter", order.get("id"))
         return False
-    href = store_info.get("meta", {}).get("href")
-    return href == store_href
+    return True
 
 
 def fetch_entity(href: str) -> Dict[str, Any]:
     headers = moysklad_headers()
     if not headers:
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+    logger.info("Fetching entity: %s", href)
     response = requests.get(href, headers=headers, timeout=10)
     response.raise_for_status()
     return response.json()
@@ -158,6 +169,7 @@ def fetch_order_positions(href: str) -> List[Dict[str, Any]]:
     headers = moysklad_headers()
     if not headers:
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+    logger.info("Fetching order positions: %s", href)
     response = requests.get(href, headers=headers, timeout=10)
     response.raise_for_status()
     return response.json().get("rows", [])
@@ -171,6 +183,12 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
     since = msk_now().subtract(days=max_days)
     filter_since = f"moment>={since.format('YYYY-MM-DD HH:mm:ss')}"
     store_href = store_href_from_env()
+    logger.info(
+        "Fetching customer orders: days=%s filter=%s store=%s",
+        max_days,
+        filter_since,
+        store_href or "none",
+    )
 
     orders: List[Dict[str, Any]] = []
     offset = 0
@@ -188,12 +206,14 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
         )
         response.raise_for_status()
         rows = response.json().get("rows", [])
+        logger.info("Fetched %s orders (offset=%s)", len(rows), offset)
         if store_href:
             rows = [order for order in rows if order_matches_store(order, store_href)]
         orders.extend(rows)
         if len(rows) < limit:
             break
         offset += limit
+    logger.info("Total orders collected: %s", len(orders))
     return orders
 
 
@@ -1116,6 +1136,8 @@ LANDING_TEMPLATE = """
                 gsap.from('.chart-section', { opacity: 0, y: 16, duration: 0.5, delay: 0.3 });
             };
 
+            console.info('[Dashboard] Initial payload loaded', initialPayload);
+
             const getStatusClass = (state) => {
                 const value = (state || '').toLowerCase();
                 if (value.includes('сдек')) return 'status-cdek';
@@ -1189,6 +1211,7 @@ LANDING_TEMPLATE = """
                 ordersList.innerHTML = '';
                 ordersList.appendChild(loadMoreSentinel);
                 renderNextChunk();
+                console.info('[Dashboard] Filters applied', { filters: activeFilters, count: filteredOrders.length });
             };
 
             const escapeHtml = (value) => {
@@ -1437,6 +1460,12 @@ LANDING_TEMPLATE = """
                 updateKpi(payload);
                 updateChart(payload);
                 applyFilters();
+                console.info('[Dashboard] Payload updated', {
+                    updated_at: payload.updated_at,
+                    total: payload.stats?.total_orders,
+                    new: payload.stats?.new_orders,
+                    cdek: payload.stats?.cdek_orders,
+                });
             };
 
             const setActiveButton = (buttons, activeValue, dataAttr) => {
@@ -1484,6 +1513,7 @@ LANDING_TEMPLATE = """
             refreshButton.addEventListener('click', async () => {
                 refreshButton.disabled = true;
                 statusText.textContent = 'Обновляем...';
+                console.info('[Dashboard] Manual refresh triggered');
                 try {
                     const response = await fetch('/refresh', { method: 'POST' });
                     const payload = await response.json();
@@ -1491,8 +1521,10 @@ LANDING_TEMPLATE = """
                         updatedAt.textContent = payload.updated_at;
                     }
                     statusText.textContent = 'Данные обновлены';
+                    console.info('[Dashboard] Manual refresh completed', payload);
                 } catch (error) {
                     statusText.textContent = 'Ошибка обновления';
+                    console.error('[Dashboard] Manual refresh failed', error);
                 } finally {
                     refreshButton.disabled = false;
                 }
@@ -1509,6 +1541,9 @@ LANDING_TEMPLATE = """
                 } catch (error) {
                     console.warn('Failed to parse event', error);
                 }
+            };
+            eventSource.onerror = (event) => {
+                console.warn('[Dashboard] EventSource error', event);
             };
         </script>
     </body>
@@ -1574,6 +1609,7 @@ async def broadcast_event(cache: Dict[str, Any]) -> None:
 async def refresh_cache(reason: str) -> Optional[Dict[str, Any]]:
     async with UPDATE_LOCK:
         try:
+            logger.info("Refreshing cache: %s", reason)
             orders = await anyio.to_thread.run_sync(fetch_customer_orders)
             cache = await anyio.to_thread.run_sync(build_cache_from_orders, orders)
             await anyio.to_thread.run_sync(write_cache, cache)
@@ -1599,6 +1635,7 @@ async def auto_refresh_loop() -> None:
 
 
 async def process_webhook_event(href: str) -> None:
+    logger.info("Processing webhook order: %s", href)
     try:
         order = await anyio.to_thread.run_sync(fetch_entity, href)
     except Exception as exc:  # noqa: BLE001
@@ -1632,6 +1669,7 @@ async def process_webhook_event(href: str) -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     ensure_cache_dir()
+    logger.info("Starting up with cache path: %s", CACHE_PATH)
     await refresh_cache("startup")
     asyncio.create_task(auto_refresh_loop())
 
