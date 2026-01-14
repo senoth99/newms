@@ -88,6 +88,60 @@ def _get_attribute_value(order: Dict[str, Any], attribute_name: str) -> Optional
     return None
 
 
+def _get_attribute_first(order: Dict[str, Any], *attribute_names: str) -> Optional[Any]:
+    for name in attribute_names:
+        value = _get_attribute_value(order, name)
+        if value:
+            return value
+    return None
+
+
+def _normalize_text(value: Optional[Any]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _extract_city_from_address(address: Optional[str]) -> Optional[str]:
+    if not address:
+        return None
+    candidate = address.split(",")[0].strip()
+    return candidate or None
+
+
+def _compose_shipment_address(shipment_full: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(shipment_full, dict):
+        return None
+    address = _normalize_text(shipment_full.get("address"))
+    if address:
+        return address
+    parts: List[str] = []
+    for key in ("postalCode", "country", "region", "city"):
+        value = _normalize_text(shipment_full.get(key))
+        if value:
+            parts.append(value)
+    street = _normalize_text(shipment_full.get("street"))
+    house = _normalize_text(shipment_full.get("house"))
+    apartment = _normalize_text(shipment_full.get("apartment"))
+    street_parts: List[str] = []
+    if street:
+        street_parts.append(street)
+    if house:
+        street_parts.append(f"д. {house}")
+    if apartment:
+        street_parts.append(f"кв. {apartment}")
+    if street_parts:
+        parts.append(", ".join(street_parts))
+    for key in ("addInfo", "comment"):
+        value = _normalize_text(shipment_full.get(key))
+        if value:
+            parts.append(value)
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
 def _format_attribute_money(value: Optional[Any]) -> str:
     if value is None:
         return "не указана"
@@ -382,25 +436,46 @@ def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
     address = None
     recipient_override = None
     if isinstance(shipment_full, dict):
-        city = shipment_full.get("city") or shipment_full.get("region")
-        address = shipment_full.get("address")
-        recipient_override = shipment_full.get("recipient")
+        city = _normalize_text(
+            shipment_full.get("city")
+            or shipment_full.get("settlement")
+            or shipment_full.get("region")
+        )
+        address = _compose_shipment_address(shipment_full)
+        recipient_override = _normalize_text(shipment_full.get("recipient"))
+        if not city and address:
+            city = _extract_city_from_address(address)
     if not city:
         shipment_address = order.get("shipmentAddress")
         if isinstance(shipment_address, str) and shipment_address:
-            city = shipment_address.split(",")[0].strip() or None
+            city = _extract_city_from_address(shipment_address)
         if not address and isinstance(shipment_address, str):
             address = shipment_address
     if not recipient_override:
-        recipient_override = _get_attribute_value(order, "получатель")
+        recipient_override = _get_attribute_first(order, "получатель", "получатель заказа")
     if not phone:
-        phone = _get_attribute_value(order, "телефон")
+        phone = _get_attribute_first(order, "телефон", "номер телефона")
     if not email:
-        email = _get_attribute_value(order, "email")
+        email = _get_attribute_first(order, "email", "электронная почта")
     if not city:
-        city = _get_attribute_value(order, "город") or _get_attribute_value(order, "city")
+        city = _get_attribute_first(
+            order,
+            "город",
+            "город доставки",
+            "населенный пункт",
+            "city",
+        )
     if not address:
-        address = _get_attribute_value(order, "адрес") or _get_attribute_value(order, "адрес доставки")
+        address = _get_attribute_first(
+            order,
+            "адрес",
+            "адрес доставки",
+            "адрес получателя",
+            "адрес доставки получателя",
+            "address",
+        )
+    if not city and address:
+        city = _extract_city_from_address(address)
     return {
         "id": order.get("id") or "",
         "name": order.get("name") or "без номера",
@@ -589,11 +664,20 @@ def _render_landing_page(
                 :root {{
                     color-scheme: dark;
                     font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+                    --matte-green: #013220;
+                    --matte-black: #050706;
+                    --matte-surface: #0f1512;
+                    --matte-surface-strong: #0b100d;
+                    --matte-white: #f7f7f5;
+                    --matte-muted: #b7c0ba;
+                    --matte-border: rgba(247, 247, 245, 0.12);
                 }}
                 body {{
                     margin: 0;
-                    background: radial-gradient(circle at top, #4a4b4f 0%, #1f2024 50%, #0d0f12 100%);
-                    color: #f2f2f2;
+                    background:
+                        radial-gradient(circle at top, rgba(1, 50, 32, 0.35) 0%, rgba(1, 50, 32, 0.08) 45%, transparent 70%),
+                        linear-gradient(135deg, #0b120f 0%, #050806 45%, #010202 100%);
+                    color: var(--matte-white);
                 }}
                 .container {{
                     max-width: 1200px;
@@ -609,7 +693,7 @@ def _render_landing_page(
                     text-transform: uppercase;
                 }}
                 .subtitle {{
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                     margin-bottom: 16px;
                     max-width: 680px;
                 }}
@@ -620,7 +704,7 @@ def _render_landing_page(
                     gap: 12px 24px;
                     margin-bottom: 24px;
                     font-size: 13px;
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                 }}
                 .meta span {{
                     display: inline-flex;
@@ -633,14 +717,13 @@ def _render_landing_page(
                     gap: 6px;
                     padding: 6px 12px;
                     border-radius: 999px;
-                    border: 1px solid rgba(255, 255, 255, 0.25);
-                    background: rgba(255, 255, 255, 0.08);
-                    box-shadow: 0 0 18px rgba(255, 255, 255, 0.12);
+                    border: 1px solid var(--matte-border);
+                    background: rgba(5, 7, 6, 0.6);
                 }}
                 .refresh-button {{
-                    border: 1px solid rgba(255, 255, 255, 0.28);
-                    background: rgba(255, 255, 255, 0.08);
-                    color: #f2f2f2;
+                    border: 1px solid rgba(1, 50, 32, 0.6);
+                    background: var(--matte-green);
+                    color: var(--matte-white);
                     font-weight: 600;
                     padding: 10px 18px;
                     border-radius: 999px;
@@ -652,7 +735,7 @@ def _render_landing_page(
                     cursor: progress;
                 }}
                 .refresh-button:not(:disabled):hover {{
-                    box-shadow: 0 0 24px rgba(255, 255, 255, 0.2);
+                    box-shadow: 0 0 0 1px rgba(1, 50, 32, 0.6);
                     transform: translateY(-1px);
                 }}
                 .grid {{
@@ -661,40 +744,40 @@ def _render_landing_page(
                     gap: 18px;
                 }}
                 .card {{
-                    background: rgba(28, 29, 33, 0.85);
+                    background: var(--matte-surface);
                     border-radius: 18px;
                     padding: 26px;
-                    box-shadow: 0 0 30px rgba(255, 255, 255, 0.08);
+                    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
                     display: flex;
                     flex-direction: column;
                     gap: 12px;
                     cursor: pointer;
-                    border: 1px solid rgba(255, 255, 255, 0.12);
+                    border: 1px solid var(--matte-border);
                     position: relative;
                     overflow: hidden;
                 }}
                 .card:hover {{
-                    border-color: rgba(255, 255, 255, 0.35);
+                    border-color: rgba(1, 50, 32, 0.6);
                 }}
                 .card.kpi-alert::after {{
                     content: "";
                     position: absolute;
                     inset: -2px;
                     border-radius: 20px;
-                    border: 1px solid rgba(255, 255, 255, 0.7);
-                    box-shadow: 0 0 24px rgba(255, 255, 255, 0.35);
+                    border: 1px solid rgba(1, 50, 32, 0.8);
+                    box-shadow: 0 0 24px rgba(1, 50, 32, 0.35);
                     animation: blink 0.45s ease-in-out 2;
                 }}
                 .value {{
                     font-size: clamp(36px, 6vw, 52px);
                     font-weight: 700;
-                    color: #f7f7f7;
+                    color: var(--matte-white);
                 }}
                 .label {{
                     font-size: 14px;
                     letter-spacing: 0.12em;
                     text-transform: uppercase;
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                 }}
                 .filters {{
                     margin-top: 28px;
@@ -713,30 +796,37 @@ def _render_landing_page(
                     font-size: 12px;
                     text-transform: uppercase;
                     letter-spacing: 0.12em;
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                 }}
                 .filter-button {{
-                    border: 1px solid rgba(255, 255, 255, 0.22);
-                    background: rgba(28, 29, 33, 0.75);
-                    color: #f2f2f2;
+                    border: 1px solid var(--matte-border);
+                    background: var(--matte-surface-strong);
+                    color: var(--matte-white);
                     padding: 8px 14px;
                     border-radius: 999px;
                     cursor: pointer;
                     font-size: 13px;
+                    transition: background-color 0.15s ease, border-color 0.15s ease;
                 }}
                 .filter-button:focus,
                 .filter-button:active {{
-                    background: rgba(28, 29, 33, 0.75);
+                    background: var(--matte-surface-strong);
                     outline: none;
+                    box-shadow: none;
+                }}
+                .filter-button:focus-visible {{
+                    outline: 1px solid rgba(1, 50, 32, 0.6);
+                    outline-offset: 1px;
                 }}
                 .filter-button.active {{
-                    border-color: rgba(255, 255, 255, 0.6);
-                    box-shadow: 0 0 20px rgba(255, 255, 255, 0.2);
+                    border-color: rgba(1, 50, 32, 0.8);
+                    background: rgba(1, 50, 32, 0.8);
+                    box-shadow: none;
                 }}
                 .reset-button {{
-                    border: 1px solid rgba(255, 255, 255, 0.28);
+                    border: 1px solid rgba(1, 50, 32, 0.4);
                     background: transparent;
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                     padding: 8px 16px;
                     border-radius: 999px;
                     cursor: pointer;
@@ -748,18 +838,18 @@ def _render_landing_page(
                     gap: 16px;
                 }}
                 .order-card {{
-                    border: 1px solid rgba(255, 255, 255, 0.16);
+                    border: 1px solid var(--matte-border);
                     border-radius: 18px;
                     padding: 18px 20px;
-                    background: rgba(20, 21, 24, 0.7);
+                    background: rgba(11, 16, 13, 0.9);
                     display: grid;
                     gap: 12px;
                     cursor: pointer;
                     transition: border 0.2s ease, box-shadow 0.2s ease;
                 }}
                 .order-card:hover {{
-                    border-color: rgba(255, 255, 255, 0.38);
-                    box-shadow: 0 0 28px rgba(255, 255, 255, 0.16);
+                    border-color: rgba(1, 50, 32, 0.6);
+                    box-shadow: 0 16px 26px rgba(0, 0, 0, 0.35);
                 }}
                 .order-card.new-flash {{
                     animation: glow 0.5s ease-in-out 1;
@@ -784,31 +874,31 @@ def _render_landing_page(
                     border: 1px solid transparent;
                 }}
                 .status-new {{
-                    color: #e5f2ff;
-                    border-color: rgba(229, 242, 255, 0.4);
+                    color: #dff6ea;
+                    border-color: rgba(223, 246, 234, 0.35);
                 }}
                 .status-paid {{
-                    color: #d9f5ff;
-                    border-color: rgba(217, 245, 255, 0.45);
+                    color: #ecf7ff;
+                    border-color: rgba(236, 247, 255, 0.4);
                 }}
                 .status-cdek {{
-                    color: #f2f2f2;
-                    border-color: rgba(242, 242, 242, 0.4);
+                    color: #f5f5f5;
+                    border-color: rgba(245, 245, 245, 0.35);
                 }}
                 .status-warning {{
-                    color: #f3e3b0;
-                    border-color: rgba(243, 227, 176, 0.45);
+                    color: #f1e3b1;
+                    border-color: rgba(241, 227, 177, 0.4);
                 }}
                 .status-error {{
-                    color: #f3b0b0;
-                    border-color: rgba(243, 176, 176, 0.45);
+                    color: #f1b8b8;
+                    border-color: rgba(241, 184, 184, 0.45);
                 }}
                 .order-meta {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
                     gap: 8px 16px;
                     font-size: 13px;
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                 }}
                 .order-meta span {{
                     display: block;
@@ -818,9 +908,9 @@ def _render_landing_page(
                     justify-content: flex-end;
                 }}
                 .order-link {{
-                    border: 1px solid rgba(255, 255, 255, 0.28);
-                    background: rgba(255, 255, 255, 0.08);
-                    color: #f2f2f2;
+                    border: 1px solid rgba(1, 50, 32, 0.6);
+                    background: rgba(1, 50, 32, 0.35);
+                    color: var(--matte-white);
                     padding: 8px 16px;
                     border-radius: 999px;
                     font-size: 13px;
@@ -829,7 +919,7 @@ def _render_landing_page(
                 .note {{
                     margin-top: 10px;
                     font-size: 12px;
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                     letter-spacing: 0.05em;
                     text-transform: uppercase;
                 }}
@@ -838,11 +928,11 @@ def _render_landing_page(
                     inset: 0;
                     pointer-events: none;
                     background-image:
-                        radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.18) 0, transparent 2px),
-                        radial-gradient(circle at 70% 20%, rgba(240, 240, 240, 0.15) 0, transparent 2px),
-                        radial-gradient(circle at 40% 80%, rgba(255, 255, 255, 0.16) 0, transparent 2px),
-                        radial-gradient(circle at 80% 60%, rgba(230, 230, 230, 0.12) 0, transparent 2px);
-                    opacity: 0.4;
+                        radial-gradient(circle at 20% 30%, rgba(247, 247, 245, 0.08) 0, transparent 2px),
+                        radial-gradient(circle at 70% 20%, rgba(247, 247, 245, 0.06) 0, transparent 2px),
+                        radial-gradient(circle at 40% 80%, rgba(247, 247, 245, 0.06) 0, transparent 2px),
+                        radial-gradient(circle at 80% 60%, rgba(247, 247, 245, 0.05) 0, transparent 2px);
+                    opacity: 0.16;
                     mix-blend-mode: screen;
                     animation: glitter 6s ease-in-out infinite;
                 }}
@@ -851,37 +941,37 @@ def _render_landing_page(
                     position: absolute;
                     inset: 0;
                     background-image:
-                        radial-gradient(circle at 10% 50%, rgba(255, 255, 255, 0.14) 0, transparent 2px),
-                        radial-gradient(circle at 90% 40%, rgba(245, 245, 245, 0.12) 0, transparent 2px);
-                    opacity: 0.5;
+                        radial-gradient(circle at 10% 50%, rgba(247, 247, 245, 0.06) 0, transparent 2px),
+                        radial-gradient(circle at 90% 40%, rgba(247, 247, 245, 0.06) 0, transparent 2px);
+                    opacity: 0.3;
                     animation: glitter 8s ease-in-out infinite reverse;
                 }}
                 .empty-state {{
                     padding: 24px;
                     border-radius: 16px;
-                    border: 1px dashed rgba(255, 255, 255, 0.25);
+                    border: 1px dashed rgba(1, 50, 32, 0.35);
                     text-align: center;
-                    color: #c9c9ce;
+                    color: var(--matte-muted);
                 }}
                 .warning {{
                     margin-top: 24px;
                     padding: 14px 18px;
                     border-radius: 14px;
-                    border: 1px solid rgba(243, 227, 176, 0.5);
-                    background: rgba(243, 227, 176, 0.12);
-                    color: #f3e3b0;
+                    border: 1px solid rgba(243, 227, 176, 0.45);
+                    background: rgba(15, 21, 18, 0.7);
+                    color: #f1e3b1;
                     font-size: 13px;
                 }}
                 .warning strong {{
-                    color: #f7efcd;
+                    color: #f6efd5;
                 }}
                 .stale {{
-                    color: #f3e3b0;
+                    color: #f1e3b1;
                 }}
                 @keyframes glow {{
-                    0% {{ box-shadow: 0 0 0 rgba(255, 255, 255, 0.0); }}
-                    50% {{ box-shadow: 0 0 28px rgba(255, 255, 255, 0.35); }}
-                    100% {{ box-shadow: 0 0 0 rgba(255, 255, 255, 0.0); }}
+                    0% {{ box-shadow: 0 0 0 rgba(1, 50, 32, 0.0); }}
+                    50% {{ box-shadow: 0 0 24px rgba(1, 50, 32, 0.35); }}
+                    100% {{ box-shadow: 0 0 0 rgba(1, 50, 32, 0.0); }}
                 }}
                 @keyframes blink {{
                     0%, 100% {{ opacity: 1; }}
