@@ -106,6 +106,26 @@ def moysklad_headers() -> Dict[str, str]:
     return {}
 
 
+def store_href_from_env() -> Optional[str]:
+    store_href = os.getenv("MS_STORE_HREF")
+    if store_href:
+        return store_href
+    store_id = os.getenv("MS_STORE_ID")
+    if not store_id:
+        return None
+    return f"https://api.moysklad.ru/api/remap/1.2/entity/store/{store_id}"
+
+
+def order_matches_store(order: Dict[str, Any], store_href: Optional[str]) -> bool:
+    if not store_href:
+        return True
+    store_info = order.get("store")
+    if not isinstance(store_info, dict):
+        return False
+    href = store_info.get("meta", {}).get("href")
+    return href == store_href
+
+
 def fetch_entity(href: str) -> Dict[str, Any]:
     headers = moysklad_headers()
     if not headers:
@@ -131,6 +151,7 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
 
     since = msk_now().subtract(days=max_days)
     filter_since = f"moment>={since.format('YYYY-MM-DD HH:mm:ss')}"
+    store_href = store_href_from_env()
 
     orders: List[Dict[str, Any]] = []
     offset = 0
@@ -141,13 +162,15 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
             params={
                 "limit": limit,
                 "offset": offset,
-                "expand": "state",
+                "expand": "state,store",
                 "filter": filter_since,
             },
             timeout=10,
         )
         response.raise_for_status()
         rows = response.json().get("rows", [])
+        if store_href:
+            rows = [order for order in rows if order_matches_store(order, store_href)]
         orders.extend(rows)
         if len(rows) < limit:
             break
@@ -1545,6 +1568,10 @@ async def process_webhook_event(href: str) -> None:
         order = await anyio.to_thread.run_sync(fetch_entity, href)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch order details: %s", exc)
+        return
+    store_href = store_href_from_env()
+    if store_href and not order_matches_store(order, store_href):
+        logger.info("Skipping order %s: store mismatch", order.get("id"))
         return
 
     try:
