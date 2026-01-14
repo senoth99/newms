@@ -58,17 +58,36 @@ def msk_now() -> pendulum.DateTime:
     return pendulum.now(MSK_TZ)
 
 
-def parse_msk(value: Optional[str]) -> Optional[pendulum.DateTime]:
-    if not value:
+def parse_msk(value: Optional[Any]) -> Optional[pendulum.DateTime]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 1_000_000_000_000:
+            timestamp /= 1000
+        return pendulum.from_timestamp(timestamp, tz=MSK_TZ)
+    text = str(value).strip()
+    if not text:
         return None
     try:
-        parsed = pendulum.parse(value, tz=MSK_TZ)
+        parsed = pendulum.parse(text, tz=MSK_TZ)
+        return parsed.in_timezone(MSK_TZ)
     except pendulum.parsing.exceptions.ParserError:
-        try:
-            parsed = pendulum.from_format(value, "YYYY-MM-DD HH:mm:ss", tz=MSK_TZ)
-        except (ValueError, pendulum.parsing.exceptions.ParserError):
-            return None
-    return parsed.in_timezone(MSK_TZ)
+        formats = (
+            "YYYY-MM-DD HH:mm:ss.SSS",
+            "YYYY-MM-DD HH:mm:ss",
+            "YYYY-MM-DDTHH:mm:ss.SSSZZ",
+            "YYYY-MM-DDTHH:mm:ssZZ",
+            "YYYY-MM-DDTHH:mm:ss.SSSZ",
+            "YYYY-MM-DDTHH:mm:ssZ",
+        )
+        for fmt in formats:
+            try:
+                parsed = pendulum.from_format(text, fmt, tz=MSK_TZ)
+                return parsed.in_timezone(MSK_TZ)
+            except (ValueError, pendulum.parsing.exceptions.ParserError):
+                continue
+    return None
 
 
 def format_msk(value: Optional[pendulum.DateTime]) -> str:
@@ -1016,9 +1035,9 @@ LANDING_TEMPLATE = """
             <div class="filters">
                 <div class="filter-group" data-filter-group="period">
                     <span class="filter-label">Период</span>
-                    <button class="filter-button active" type="button" data-period="today">Сегодня</button>
+                    <button class="filter-button" type="button" data-period="today">Сегодня</button>
                     <button class="filter-button" type="button" data-period="three_days">3 дня</button>
-                    <button class="filter-button" type="button" data-period="week">7 дней</button>
+                    <button class="filter-button active" type="button" data-period="week">7 дней</button>
                 </div>
                 <div class="filter-group" data-filter-group="status">
                     <span class="filter-label">Статус</span>
@@ -1062,7 +1081,7 @@ LANDING_TEMPLATE = """
             const initialPayload = __INITIAL_PAYLOAD__;
             let currentPayload = initialPayload;
             let knownOrderIds = new Set((initialPayload.orders || []).map((order) => order.id));
-            let activeFilters = { period: 'today', status: 'all' };
+            let activeFilters = { period: 'week', status: 'all' };
             let filteredOrders = [];
             let renderIndex = 0;
             const PAGE_SIZE = 30;
@@ -1120,13 +1139,29 @@ LANDING_TEMPLATE = """
                 return currentPayload?.server_msk_today_start_ms || 0;
             };
 
+            const getRecentDayKeys = () => {
+                const days = currentPayload?.days || [];
+                if (!days.length) return new Set();
+                if (activeFilters.period === 'today') {
+                    return new Set(days.slice(-1).map((day) => day.key));
+                }
+                if (activeFilters.period === 'three_days') {
+                    return new Set(days.slice(-3).map((day) => day.key));
+                }
+                return new Set(days.map((day) => day.key));
+            };
+
             const filterByPeriod = (orders) => {
                 if (activeFilters.period === 'week') return orders;
                 const nowMs = currentPayload?.server_msk_now_ms || 0;
                 const todayStart = getMskTodayStartMs();
+                const recentDayKeys = getRecentDayKeys();
                 return orders.filter((order) => {
                     const orderTime = order.moment_ms || 0;
-                    if (!orderTime) return false;
+                    if (!orderTime) {
+                        const dayKey = order.day_key;
+                        return dayKey && recentDayKeys.has(dayKey);
+                    }
                     if (activeFilters.period === 'today') {
                         return orderTime >= todayStart;
                     }
@@ -1428,7 +1463,7 @@ LANDING_TEMPLATE = """
             });
 
             resetFilters.addEventListener('click', () => {
-                activeFilters = { period: 'today', status: 'all' };
+                activeFilters = { period: 'week', status: 'all' };
                 setActiveButton(periodButtons, activeFilters.period, 'data-period');
                 setActiveButton(statusButtons, activeFilters.status, 'data-status');
                 applyFilters();
