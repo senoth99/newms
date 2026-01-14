@@ -58,17 +58,36 @@ def msk_now() -> pendulum.DateTime:
     return pendulum.now(MSK_TZ)
 
 
-def parse_msk(value: Optional[str]) -> Optional[pendulum.DateTime]:
-    if not value:
+def parse_msk(value: Optional[Any]) -> Optional[pendulum.DateTime]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 1_000_000_000_000:
+            timestamp /= 1000
+        return pendulum.from_timestamp(timestamp, tz=MSK_TZ)
+    text = str(value).strip()
+    if not text:
         return None
     try:
-        parsed = pendulum.parse(value, tz=MSK_TZ)
+        parsed = pendulum.parse(text, tz=MSK_TZ)
+        return parsed.in_timezone(MSK_TZ)
     except pendulum.parsing.exceptions.ParserError:
-        try:
-            parsed = pendulum.from_format(value, "YYYY-MM-DD HH:mm:ss", tz=MSK_TZ)
-        except (ValueError, pendulum.parsing.exceptions.ParserError):
-            return None
-    return parsed.in_timezone(MSK_TZ)
+        formats = (
+            "YYYY-MM-DD HH:mm:ss.SSS",
+            "YYYY-MM-DD HH:mm:ss",
+            "YYYY-MM-DDTHH:mm:ss.SSSZZ",
+            "YYYY-MM-DDTHH:mm:ssZZ",
+            "YYYY-MM-DDTHH:mm:ss.SSSZ",
+            "YYYY-MM-DDTHH:mm:ssZ",
+        )
+        for fmt in formats:
+            try:
+                parsed = pendulum.from_format(text, fmt, tz=MSK_TZ)
+                return parsed.in_timezone(MSK_TZ)
+            except (ValueError, pendulum.parsing.exceptions.ParserError):
+                continue
+    return None
 
 
 def format_msk(value: Optional[pendulum.DateTime]) -> str:
@@ -106,6 +125,26 @@ def moysklad_headers() -> Dict[str, str]:
     return {}
 
 
+def store_href_from_env() -> Optional[str]:
+    store_href = os.getenv("MS_STORE_HREF")
+    if store_href:
+        return store_href
+    store_id = os.getenv("MS_STORE_ID")
+    if not store_id:
+        return None
+    return f"https://api.moysklad.ru/api/remap/1.2/entity/store/{store_id}"
+
+
+def order_matches_store(order: Dict[str, Any], store_href: Optional[str]) -> bool:
+    if not store_href:
+        return True
+    store_info = order.get("store")
+    if not isinstance(store_info, dict):
+        return False
+    href = store_info.get("meta", {}).get("href")
+    return href == store_href
+
+
 def fetch_entity(href: str) -> Dict[str, Any]:
     headers = moysklad_headers()
     if not headers:
@@ -131,6 +170,7 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
 
     since = msk_now().subtract(days=max_days)
     filter_since = f"moment>={since.format('YYYY-MM-DD HH:mm:ss')}"
+    store_href = store_href_from_env()
 
     orders: List[Dict[str, Any]] = []
     offset = 0
@@ -141,13 +181,15 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
             params={
                 "limit": limit,
                 "offset": offset,
-                "expand": "state",
+                "expand": "state,store",
                 "filter": filter_since,
             },
             timeout=10,
         )
         response.raise_for_status()
         rows = response.json().get("rows", [])
+        if store_href:
+            rows = [order for order in rows if order_matches_store(order, store_href)]
         orders.extend(rows)
         if len(rows) < limit:
             break
@@ -993,9 +1035,9 @@ LANDING_TEMPLATE = """
             <div class="filters">
                 <div class="filter-group" data-filter-group="period">
                     <span class="filter-label">Период</span>
-                    <button class="filter-button active" type="button" data-period="today">Сегодня</button>
+                    <button class="filter-button" type="button" data-period="today">Сегодня</button>
                     <button class="filter-button" type="button" data-period="three_days">3 дня</button>
-                    <button class="filter-button" type="button" data-period="week">7 дней</button>
+                    <button class="filter-button active" type="button" data-period="week">7 дней</button>
                 </div>
                 <div class="filter-group" data-filter-group="status">
                     <span class="filter-label">Статус</span>
@@ -1039,7 +1081,7 @@ LANDING_TEMPLATE = """
             const initialPayload = __INITIAL_PAYLOAD__;
             let currentPayload = initialPayload;
             let knownOrderIds = new Set((initialPayload.orders || []).map((order) => order.id));
-            let activeFilters = { period: 'today', status: 'all' };
+            let activeFilters = { period: 'week', status: 'all' };
             let filteredOrders = [];
             let renderIndex = 0;
             const PAGE_SIZE = 30;
@@ -1097,13 +1139,29 @@ LANDING_TEMPLATE = """
                 return currentPayload?.server_msk_today_start_ms || 0;
             };
 
+            const getRecentDayKeys = () => {
+                const days = currentPayload?.days || [];
+                if (!days.length) return new Set();
+                if (activeFilters.period === 'today') {
+                    return new Set(days.slice(-1).map((day) => day.key));
+                }
+                if (activeFilters.period === 'three_days') {
+                    return new Set(days.slice(-3).map((day) => day.key));
+                }
+                return new Set(days.map((day) => day.key));
+            };
+
             const filterByPeriod = (orders) => {
                 if (activeFilters.period === 'week') return orders;
                 const nowMs = currentPayload?.server_msk_now_ms || 0;
                 const todayStart = getMskTodayStartMs();
+                const recentDayKeys = getRecentDayKeys();
                 return orders.filter((order) => {
                     const orderTime = order.moment_ms || 0;
-                    if (!orderTime) return false;
+                    if (!orderTime) {
+                        const dayKey = order.day_key;
+                        return dayKey && recentDayKeys.has(dayKey);
+                    }
                     if (activeFilters.period === 'today') {
                         return orderTime >= todayStart;
                     }
@@ -1405,7 +1463,7 @@ LANDING_TEMPLATE = """
             });
 
             resetFilters.addEventListener('click', () => {
-                activeFilters = { period: 'today', status: 'all' };
+                activeFilters = { period: 'week', status: 'all' };
                 setActiveButton(periodButtons, activeFilters.period, 'data-period');
                 setActiveButton(statusButtons, activeFilters.status, 'data-status');
                 applyFilters();
@@ -1545,6 +1603,10 @@ async def process_webhook_event(href: str) -> None:
         order = await anyio.to_thread.run_sync(fetch_entity, href)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch order details: %s", exc)
+        return
+    store_href = store_href_from_env()
+    if store_href and not order_matches_store(order, store_href):
+        logger.info("Skipping order %s: store mismatch", order.get("id"))
         return
 
     try:
