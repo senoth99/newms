@@ -152,7 +152,6 @@ def build_message(order: Dict[str, Any]) -> str:
         if order_id != "не указан"
         else order.get("meta", {}).get("href")
     ) or "нет"
-    site = state
     recipient = (
         order.get("shipmentAddressFull", {}).get("recipient")
         or _get_attribute_value(order, "получатель")
@@ -170,7 +169,6 @@ def build_message(order: Dict[str, Any]) -> str:
         or _get_attribute_value(order, "email")
         or "не указан"
     )
-    telegram = _get_attribute_value(order, "telegram") or _get_attribute_value(order, "телеграм") or "не указан"
     delivery_service = order.get("shipmentAddressFull", {}).get("deliveryService")
     shipment_method = order.get("shipmentAddressFull", {}).get("shipmentMethod")
     delivery_method = _get_attribute_value(order, "способ доставки")
@@ -193,8 +191,6 @@ def build_message(order: Dict[str, Any]) -> str:
     )
     delivery_link = _get_attribute_value(order, "ссылка на доставку") or "не указана"
     track_number = _get_attribute_value(order, "трек-номер") or "не указан"
-    delivery_cost = _format_attribute_money(_get_attribute_value(order, "стоимость доставки"))
-    promo_code = _get_attribute_value(order, "промокод") or "не указан"
 
     positions_meta = order.get("positions", {}).get("meta", {}).get("href")
     positions = order.get("positions", {}).get("rows") or []
@@ -203,20 +199,17 @@ def build_message(order: Dict[str, Any]) -> str:
     positions_text = _format_positions(positions)
 
     return (
-        f"📦 Заказ с \"{site}\" ({state})\n"
+        f"📦 Заказ с ({state})\n"
         f"ID заказа: {name}\n\n"
         f"👤 Получатель: {recipient}\n"
         f"📞 Номер телефона: {phone}\n"
         f"📧 Email: {email}\n"
-        f"Telegram (telegram): {telegram}\n"
         f"Способ доставки: {delivery_method}\n\n"
         f"🏠 Адрес доставки: {address}\n"
         f"Ссылка на доставку: {delivery_link}\n"
         f"Трек-номер: {track_number}\n\n"
         "Состав заказа:\n"
         f"{positions_text}\n\n"
-        f"Стоимость доставки: {delivery_cost} руб.\n\n"
-        f"Промокод: {promo_code}\n\n"
         f"Сумма заказа: {sum_value} руб.\n\n"
         f"Комментарий: {description}\n"
         f"Создан: {moment}\n"
