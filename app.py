@@ -1,4 +1,5 @@
 import os
+from html import escape
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -365,19 +366,61 @@ def _count_orders_by_state(orders: List[Dict[str, Any]]) -> Dict[str, int]:
     counts = {"new_orders": 0, "cdek_orders": 0}
     for order in orders:
         state_name = _get_state_name(order)
-        if state_name == CDEK_ORDER_STATE:
+        if _is_cdek_state(state_name):
             counts["cdek_orders"] += 1
+            continue
         if state_name not in EXCLUDED_NEW_ORDER_STATES:
             counts["new_orders"] += 1
     return counts
 
 
-def _render_landing_page(new_orders: int, cdek_orders: int, error: Optional[str]) -> str:
+def _order_row(order: Dict[str, Any]) -> Dict[str, str]:
+    name = order.get("name") or "без номера"
+    state = _get_state_name(order)
+    moment = _format_datetime(order.get("moment"))
+    total = _format_money(order.get("sum"))
+    order_link = _order_link(order)
+    return {
+        "name": escape(str(name)),
+        "state": escape(str(state)),
+        "moment": escape(str(moment)),
+        "total": escape(str(total)),
+        "link": escape(str(order_link)),
+    }
+
+
+def _render_table_rows(rows: List[Dict[str, str]]) -> str:
+    if not rows:
+        return """
+        <tr class="empty-row">
+            <td colspan="4">Нет заказов</td>
+        </tr>
+        """
+    return "\n".join(
+        f"""
+        <tr>
+            <td><a href="{row["link"]}" target="_blank" rel="noreferrer">{row["name"]}</a></td>
+            <td>{row["state"]}</td>
+            <td>{row["moment"]}</td>
+            <td>{row["total"]}</td>
+        </tr>
+        """
+        for row in rows
+    )
+
+
+def _render_landing_page(
+    new_orders: int,
+    cdek_orders: int,
+    new_order_rows: List[Dict[str, str]],
+    cdek_order_rows: List[Dict[str, str]],
+    error: Optional[str],
+) -> str:
     error_block = ""
     if error:
         error_block = f"""
         <div class="error">
-            Не удалось получить данные: {error}
+            Не удалось получить данные: {escape(error)}
         </div>
         """
     return f"""
@@ -394,8 +437,8 @@ def _render_landing_page(new_orders: int, cdek_orders: int, error: Optional[str]
                 }}
                 body {{
                     margin: 0;
-                    background: #f5f6fb;
-                    color: #1f2937;
+                    background: #013220;
+                    color: #c6c6c6;
                 }}
                 .container {{
                     max-width: 960px;
@@ -407,7 +450,7 @@ def _render_landing_page(new_orders: int, cdek_orders: int, error: Optional[str]
                     margin-bottom: 12px;
                 }}
                 .subtitle {{
-                    color: #6b7280;
+                    color: #c6c6c6;
                     margin-bottom: 32px;
                 }}
                 .grid {{
@@ -416,13 +459,20 @@ def _render_landing_page(new_orders: int, cdek_orders: int, error: Optional[str]
                     gap: 24px;
                 }}
                 .card {{
-                    background: #ffffff;
+                    background: #c6c6c6;
                     border-radius: 16px;
                     padding: 28px;
-                    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+                    box-shadow: 0 10px 30px rgba(1, 50, 32, 0.4);
                     display: flex;
                     flex-direction: column;
                     gap: 12px;
+                    color: #013220;
+                    cursor: pointer;
+                    border: 2px solid transparent;
+                }}
+                .card:focus,
+                .card:hover {{
+                    border-color: #013220;
                 }}
                 .value {{
                     font-size: 48px;
@@ -432,14 +482,55 @@ def _render_landing_page(new_orders: int, cdek_orders: int, error: Optional[str]
                     font-size: 14px;
                     letter-spacing: 0.12em;
                     text-transform: uppercase;
-                    color: #6b7280;
+                    color: #013220;
+                }}
+                .tables {{
+                    margin-top: 32px;
+                    display: grid;
+                    gap: 24px;
+                }}
+                .table-card {{
+                    background: #c6c6c6;
+                    border-radius: 16px;
+                    padding: 20px;
+                    color: #013220;
+                    display: none;
+                }}
+                .table-card.active {{
+                    display: block;
+                }}
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-top: 12px;
+                }}
+                th,
+                td {{
+                    padding: 12px 10px;
+                    text-align: left;
+                    border-bottom: 1px solid rgba(1, 50, 32, 0.2);
+                    font-size: 14px;
+                }}
+                th {{
+                    text-transform: uppercase;
+                    font-size: 12px;
+                    letter-spacing: 0.08em;
+                }}
+                a {{
+                    color: #013220;
+                    font-weight: 600;
+                    text-decoration: none;
+                }}
+                .empty-row td {{
+                    text-align: center;
+                    font-style: italic;
                 }}
                 .error {{
                     margin-top: 24px;
                     padding: 16px 20px;
                     border-radius: 12px;
-                    background: #fee2e2;
-                    color: #991b1b;
+                    background: #c6c6c6;
+                    color: #013220;
                     font-size: 14px;
                 }}
             </style>
@@ -451,17 +542,69 @@ def _render_landing_page(new_orders: int, cdek_orders: int, error: Optional[str]
                     Здесь отображаются новые заказы и заказы, собранные в СДЭК.
                 </div>
                 <div class="grid">
-                    <div class="card">
+                    <button class="card" type="button" data-target="new-orders-table">
                         <div class="value">{new_orders}</div>
                         <div class="label">НОВЫЕ ЗАКАЗЫ</div>
-                    </div>
-                    <div class="card">
+                    </button>
+                    <button class="card" type="button" data-target="cdek-orders-table">
                         <div class="value">{cdek_orders}</div>
                         <div class="label">ОТПРАВЛЕНО СДЕК</div>
+                    </button>
+                </div>
+                <div class="tables">
+                    <div class="table-card" id="new-orders-table">
+                        <h2>Новые заказы</h2>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Заказ</th>
+                                    <th>Статус</th>
+                                    <th>Дата</th>
+                                    <th>Сумма</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {_render_table_rows(new_order_rows)}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="table-card" id="cdek-orders-table">
+                        <h2>Отправлено СДЭК</h2>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Заказ</th>
+                                    <th>Статус</th>
+                                    <th>Дата</th>
+                                    <th>Сумма</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {_render_table_rows(cdek_order_rows)}
+                            </tbody>
+                        </table>
                     </div>
                 </div>
                 {error_block}
             </div>
+            <script>
+                const cards = document.querySelectorAll('[data-target]');
+                cards.forEach((card) => {{
+                    card.addEventListener('click', () => {{
+                        const targetId = card.getAttribute('data-target');
+                        if (!targetId) return;
+                        const target = document.getElementById(targetId);
+                        if (!target) return;
+                        const isActive = target.classList.contains('active');
+                        document.querySelectorAll('.table-card').forEach((table) => {{
+                            table.classList.remove('active');
+                        }});
+                        if (!isActive) {{
+                            target.classList.add('active');
+                        }}
+                    }});
+                }});
+            </script>
         </body>
     </html>
     """
@@ -474,7 +617,38 @@ def health() -> Dict[str, str]:
 
 @app.get("/", response_class=HTMLResponse)
 def landing() -> HTMLResponse:
-    html = _render_landing_page(new_orders=0, cdek_orders=0, error=None)
+    error: Optional[str] = None
+    new_order_rows: List[Dict[str, str]] = []
+    cdek_order_rows: List[Dict[str, str]] = []
+    counts = {"new_orders": 0, "cdek_orders": 0}
+    try:
+        orders = fetch_customer_orders()
+        counts = _count_orders_by_state(orders)
+        new_orders = [
+            _order_row(order)
+            for order in orders
+            if _get_state_name(order) not in EXCLUDED_NEW_ORDER_STATES
+            and not _is_cdek_state(_get_state_name(order))
+        ]
+        cdek_orders = [
+            _order_row(order)
+            for order in orders
+            if _is_cdek_state(_get_state_name(order))
+        ]
+        new_order_rows = sorted(new_orders, key=lambda row: row["moment"], reverse=True)
+        cdek_order_rows = sorted(cdek_orders, key=lambda row: row["moment"], reverse=True)
+    except requests.RequestException as exc:
+        error = str(exc)
+    except RuntimeError as exc:
+        error = str(exc)
+
+    html = _render_landing_page(
+        new_orders=counts["new_orders"],
+        cdek_orders=counts["cdek_orders"],
+        new_order_rows=new_order_rows,
+        cdek_order_rows=cdek_order_rows,
+        error=error,
+    )
     return HTMLResponse(content=html, status_code=200)
 
 
