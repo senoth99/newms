@@ -968,7 +968,7 @@ def _render_landing_page(
                     if (value === null || value === undefined) return 'не указана';
                     const normalized = Number(value) / 100;
                     if (Number.isNaN(normalized)) return 'не указана';
-                    return `${normalized.toFixed(2)} руб.`;
+                    return `${{normalized.toFixed(2)}} руб.`;
                 }};
 
                 const getStatusClass = (state) => {{
