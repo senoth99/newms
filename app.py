@@ -704,20 +704,26 @@ def _render_landing_page(
                 :root {{
                     color-scheme: dark;
                     font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-                    --matte-green: #013220;
+                    --matte-green: #00f5a0;
                     --matte-black: #050706;
-                    --matte-surface: #0f1512;
-                    --matte-surface-strong: #0b100d;
+                    --matte-surface: rgba(12, 18, 15, 0.82);
+                    --matte-surface-strong: rgba(12, 18, 15, 0.95);
                     --matte-white: #f7f7f5;
-                    --matte-muted: #b7c0ba;
+                    --matte-muted: #8c9a92;
                     --matte-border: rgba(247, 247, 245, 0.12);
-                    --neon-green: #39ff88;
+                    --neon-green: #4cffb2;
+                    --accent-blue: #5cc8ff;
+                    --accent-purple: #8f6bff;
+                    --accent-warning: #f1e3b1;
+                    --glass-border: rgba(247, 247, 245, 0.08);
                 }}
                 body {{
                     margin: 0;
                     background:
-                        radial-gradient(circle at top, rgba(1, 50, 32, 0.35) 0%, rgba(1, 50, 32, 0.08) 45%, transparent 70%),
-                        linear-gradient(135deg, #0b120f 0%, #050806 45%, #010202 100%);
+                        radial-gradient(circle at top left, rgba(92, 200, 255, 0.18) 0%, transparent 45%),
+                        radial-gradient(circle at 40% 0, rgba(76, 255, 178, 0.15) 0%, transparent 50%),
+                        radial-gradient(circle at 90% 10%, rgba(143, 107, 255, 0.18) 0%, transparent 55%),
+                        linear-gradient(140deg, #050806 0%, #090f0c 45%, #020403 100%);
                     color: var(--matte-white);
                     background-attachment: fixed;
                 }}
@@ -732,10 +738,31 @@ def _render_landing_page(
                     position: relative;
                     z-index: 1;
                 }}
+                .hero {{
+                    display: grid;
+                    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+                    gap: 24px;
+                    margin-bottom: 32px;
+                    align-items: stretch;
+                }}
+                .hero-panel {{
+                    background: var(--matte-surface);
+                    border: 1px solid var(--glass-border);
+                    border-radius: 22px;
+                    padding: 26px 28px;
+                    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+                    backdrop-filter: blur(16px);
+                }}
+                .hero-eyebrow {{
+                    font-size: 12px;
+                    letter-spacing: 0.35em;
+                    text-transform: uppercase;
+                    color: var(--matte-muted);
+                }}
                 h1 {{
                     font-size: clamp(24px, 4vw, 36px);
-                    margin-bottom: 8px;
-                    letter-spacing: 0.08em;
+                    margin: 10px 0 12px;
+                    letter-spacing: 0.12em;
                     text-transform: uppercase;
                 }}
                 .subtitle {{
@@ -743,14 +770,23 @@ def _render_landing_page(
                     margin-bottom: 16px;
                     max-width: 680px;
                 }}
+                .note {{
+                    margin-top: 16px;
+                    font-size: 12px;
+                    color: rgba(247, 247, 245, 0.7);
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                }}
                 .meta {{
                     display: flex;
                     flex-wrap: wrap;
                     align-items: center;
                     gap: 12px 24px;
-                    margin-bottom: 24px;
                     font-size: 13px;
                     color: var(--matte-muted);
+                }}
+                .meta span strong {{
+                    color: var(--matte-white);
                 }}
                 .meta span {{
                     display: inline-flex;
@@ -763,13 +799,13 @@ def _render_landing_page(
                     gap: 6px;
                     padding: 6px 12px;
                     border-radius: 999px;
-                    border: 1px solid var(--matte-border);
-                    background: rgba(5, 7, 6, 0.6);
+                    border: 1px solid rgba(92, 200, 255, 0.35);
+                    background: rgba(7, 15, 19, 0.6);
                 }}
                 .refresh-button {{
-                    border: 1px solid rgba(1, 50, 32, 0.6);
-                    background: var(--matte-green);
-                    color: var(--matte-white);
+                    border: 1px solid rgba(76, 255, 178, 0.65);
+                    background: linear-gradient(120deg, rgba(76, 255, 178, 0.35), rgba(92, 200, 255, 0.35));
+                    color: #04110a;
                     font-weight: 600;
                     padding: 10px 18px;
                     border-radius: 999px;
@@ -781,8 +817,11 @@ def _render_landing_page(
                     cursor: progress;
                 }}
                 .refresh-button:not(:disabled):hover {{
-                    box-shadow: 0 0 0 1px rgba(1, 50, 32, 0.6);
+                    box-shadow: 0 12px 24px rgba(76, 255, 178, 0.2);
                     transform: translateY(-1px);
+                }}
+                .kpi-grid {{
+                    margin-top: 8px;
                 }}
                 .grid {{
                     display: grid;
@@ -803,7 +842,7 @@ def _render_landing_page(
                     overflow: hidden;
                 }}
                 .card:hover {{
-                    border-color: rgba(1, 50, 32, 0.6);
+                    border-color: rgba(76, 255, 178, 0.6);
                 }}
                 .card.kpi-alert {{
                     box-shadow: 0 0 18px rgba(57, 255, 136, 0.35);
@@ -813,7 +852,7 @@ def _render_landing_page(
                     font-size: clamp(36px, 6vw, 52px);
                     font-weight: 700;
                     color: var(--matte-white);
-                    text-shadow: 0 0 12px rgba(57, 255, 136, 0.15);
+                    text-shadow: 0 0 12px rgba(76, 255, 178, 0.2);
                     position: relative;
                 }}
                 .value::after {{
@@ -822,8 +861,8 @@ def _render_landing_page(
                     width: 40px;
                     height: 2px;
                     margin-top: 8px;
-                    background: rgba(57, 255, 136, 0.4);
-                    box-shadow: 0 0 8px rgba(57, 255, 136, 0.35);
+                    background: rgba(76, 255, 178, 0.4);
+                    box-shadow: 0 0 8px rgba(76, 255, 178, 0.35);
                     border-radius: 999px;
                 }}
                 .label {{
@@ -844,6 +883,10 @@ def _render_landing_page(
                     flex-wrap: wrap;
                     gap: 10px;
                     align-items: center;
+                    background: var(--matte-surface);
+                    border: 1px solid var(--glass-border);
+                    border-radius: 999px;
+                    padding: 8px 12px;
                 }}
                 .filter-label {{
                     font-size: 12px;
@@ -875,6 +918,10 @@ def _render_landing_page(
                     box-shadow: none;
                     outline: none;
                 }}
+                .filter-button.active {{
+                    border-color: rgba(92, 200, 255, 0.6);
+                    box-shadow: 0 6px 16px rgba(92, 200, 255, 0.18);
+                }}
                 .reset-button {{
                     border: 1px solid rgba(1, 50, 32, 0.4);
                     color: var(--matte-muted);
@@ -892,14 +939,14 @@ def _render_landing_page(
                     border: 1px solid var(--matte-border);
                     border-radius: 18px;
                     padding: 20px 22px 22px;
-                    background: rgba(11, 16, 13, 0.9);
+                    background: rgba(10, 16, 13, 0.88);
                     display: grid;
                     gap: 16px;
                     cursor: pointer;
                     transition: border 0.2s ease, box-shadow 0.2s ease;
                 }}
                 .order-card:hover {{
-                    border-color: rgba(57, 255, 136, 0.35);
+                    border-color: rgba(92, 200, 255, 0.45);
                     box-shadow: 0 16px 26px rgba(0, 0, 0, 0.32);
                 }}
                 .order-card.new-order {{
@@ -992,20 +1039,13 @@ def _render_landing_page(
                     justify-content: flex-end;
                 }}
                 .order-link {{
-                    border: 1px solid rgba(1, 50, 32, 0.6);
-                    background: rgba(1, 50, 32, 0.35);
+                    border: 1px solid rgba(92, 200, 255, 0.4);
+                    background: rgba(7, 15, 19, 0.6);
                     color: var(--matte-white);
                     padding: 8px 16px;
                     border-radius: 999px;
                     font-size: 13px;
                     text-decoration: none;
-                }}
-                .note {{
-                    margin-top: 10px;
-                    font-size: 12px;
-                    color: var(--matte-muted);
-                    letter-spacing: 0.05em;
-                    text-transform: uppercase;
                 }}
                 .glitter {{
                     position: fixed;
@@ -1065,6 +1105,9 @@ def _render_landing_page(
                     .container {{
                         padding: 24px 16px 48px;
                     }}
+                    .hero {{
+                        grid-template-columns: 1fr;
+                    }}
                     .order-actions {{
                         justify-content: flex-start;
                     }}
@@ -1074,18 +1117,25 @@ def _render_landing_page(
         <body>
             <div class="glitter" aria-hidden="true"></div>
             <div class="container">
-                <h1>CASHER OPS DASHBOARD</h1>
-                <div class="subtitle">
-                    Операционный контроль заказов CASHER в реальном времени: новые заявки,
-                    статусы и визуальный контроль.
-                </div>
-                <div class="note">Данные загружаются максимум за последние 7 дней.</div>
-                <div class="meta">
-                    <span>Обновлено: <strong id="updated-at">{escape(updated_text)}</strong></span>
-                    <span class="status-pill">Статус: <strong id="status-text">{escape(status_text)}</strong></span>
-                    <button class="refresh-button" id="refresh-button" type="button">Обновить</button>
-                </div>
-                <div class="grid">
+                <section class="hero">
+                    <div class="hero-panel">
+                        <div class="hero-eyebrow">Live Ops</div>
+                        <h1>CASHER OPS DASHBOARD</h1>
+                        <div class="subtitle">
+                            Операционный контроль заказов CASHER в реальном времени: новые заявки,
+                            статусы и визуальный контроль.
+                        </div>
+                        <div class="note">Данные загружаются максимум за последние 7 дней.</div>
+                    </div>
+                    <div class="hero-panel">
+                        <div class="meta">
+                            <span>Обновлено: <strong id="updated-at">{escape(updated_text)}</strong></span>
+                            <span class="status-pill">Статус: <strong id="status-text">{escape(status_text)}</strong></span>
+                            <button class="refresh-button" id="refresh-button" type="button">Обновить</button>
+                        </div>
+                    </div>
+                </section>
+                <div class="grid kpi-grid">
                     <button class="card" type="button" id="kpi-new-orders">
                         <div class="value" id="new-orders-count">{new_orders}</div>
                         <div class="label">НОВЫЕ ЗАКАЗЫ</div>
