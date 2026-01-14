@@ -361,12 +361,22 @@ def send_telegram_message(text: str) -> None:
 
 def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
     state_name = _get_state_name(order)
+    agent_info = order.get("agent")
+    recipient = None
+    if isinstance(agent_info, dict):
+        recipient = agent_info.get("name")
+    shipment_full = order.get("shipmentAddressFull")
+    city = None
+    if isinstance(shipment_full, dict):
+        city = shipment_full.get("city") or shipment_full.get("region")
     return {
         "id": order.get("id") or "",
         "name": order.get("name") or "без номера",
         "state": state_name,
         "moment": order.get("moment"),
         "sum": order.get("sum"),
+        "city": city,
+        "recipient": recipient,
         "link": _order_link(order),
     }
 
@@ -496,41 +506,14 @@ def _event_payload(cache: Dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _order_row_cached(order: Dict[str, Any]) -> Dict[str, str]:
-    return {
-        "name": escape(str(order.get("name") or "без номера")),
-        "state": escape(str(order.get("state") or "не указан")),
-        "moment": escape(_format_datetime(order.get("moment"))),
-        "total": escape(_format_money(order.get("sum"))),
-        "link": escape(str(order.get("link") or "нет")),
-    }
-
-
-def _render_table_rows(rows: List[Dict[str, str]]) -> str:
-    if not rows:
-        return """
-        <tr class="empty-row">
-            <td colspan="4">Нет заказов</td>
-        </tr>
-        """
-    return "\n".join(
-        f"""
-        <tr>
-            <td><a href="{row["link"]}" target="_blank" rel="noreferrer">{row["name"]}</a></td>
-            <td>{row["state"]}</td>
-            <td>{row["moment"]}</td>
-            <td>{row["total"]}</td>
-        </tr>
-        """
-        for row in rows
-    )
+def _safe_json_dumps(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
 
 
 def _render_landing_page(
     new_orders: int,
     cdek_orders: int,
-    new_order_rows: List[Dict[str, str]],
-    cdek_order_rows: List[Dict[str, str]],
+    orders: List[Dict[str, Any]],
     updated_at: Optional[str],
     stale: bool,
     has_cache: bool,
@@ -551,275 +534,543 @@ def _render_landing_page(
             Данные загружаются. Попробуйте обновить позже.
         </div>
         """
+    initial_payload = _safe_json_dumps(
+        {
+            "updated_at": updated_at,
+            "ttl_seconds": CACHE_TTL_SECONDS,
+            "stats": {"new_orders": new_orders, "cdek_orders": cdek_orders},
+            "orders": orders,
+            "stale": stale,
+        }
+    )
     return f"""
     <!doctype html>
     <html lang="ru">
         <head>
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1" />
-            <title>Статистика заказов</title>
+            <title>CASHER OPS DASHBOARD</title>
             <style>
                 :root {{
-                    color-scheme: light;
-                    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+                    color-scheme: dark;
+                    font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
                 }}
                 body {{
                     margin: 0;
-                    background: #013220;
-                    color: #c6c6c6;
+                    background: radial-gradient(circle at top, #0f3d2e 0%, #0b0f0d 45%, #000000 100%);
+                    color: #e5e5e5;
                 }}
                 .container {{
-                    max-width: 960px;
+                    max-width: 1200px;
                     margin: 0 auto;
-                    padding: 48px 24px 64px;
+                    padding: 32px 20px 64px;
                 }}
                 h1 {{
-                    font-size: 32px;
-                    margin-bottom: 12px;
+                    font-size: clamp(24px, 4vw, 36px);
+                    margin-bottom: 8px;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
                 }}
                 .subtitle {{
                     color: #c6c6c6;
-                    margin-bottom: 8px;
+                    margin-bottom: 16px;
+                    max-width: 680px;
                 }}
                 .meta {{
                     display: flex;
                     flex-wrap: wrap;
                     align-items: center;
-                    gap: 16px;
-                    margin-bottom: 32px;
-                    font-size: 14px;
+                    gap: 12px 24px;
+                    margin-bottom: 24px;
+                    font-size: 13px;
+                    color: #c6c6c6;
                 }}
                 .meta span {{
                     display: inline-flex;
                     gap: 6px;
                     align-items: center;
                 }}
+                .status-pill {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    padding: 6px 12px;
+                    border-radius: 999px;
+                    border: 1px solid rgba(198, 198, 198, 0.3);
+                    background: rgba(15, 61, 46, 0.4);
+                    box-shadow: 0 0 18px rgba(35, 255, 180, 0.15);
+                }}
                 .refresh-button {{
-                    border: none;
-                    background: #c6c6c6;
-                    color: #013220;
+                    border: 1px solid rgba(198, 198, 198, 0.4);
+                    background: rgba(15, 61, 46, 0.6);
+                    color: #e5e5e5;
                     font-weight: 600;
-                    padding: 10px 16px;
+                    padding: 10px 18px;
                     border-radius: 999px;
                     cursor: pointer;
+                    transition: box-shadow 0.2s ease, transform 0.2s ease;
                 }}
                 .refresh-button:disabled {{
                     opacity: 0.6;
                     cursor: progress;
                 }}
+                .refresh-button:not(:disabled):hover {{
+                    box-shadow: 0 0 18px rgba(35, 255, 180, 0.35);
+                    transform: translateY(-1px);
+                }}
                 .grid {{
                     display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-                    gap: 24px;
+                    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                    gap: 18px;
                 }}
                 .card {{
-                    background: #c6c6c6;
-                    border-radius: 16px;
-                    padding: 28px;
-                    box-shadow: 0 10px 30px rgba(1, 50, 32, 0.4);
+                    background: rgba(11, 15, 13, 0.7);
+                    border-radius: 18px;
+                    padding: 26px;
+                    box-shadow: 0 0 24px rgba(35, 255, 180, 0.1);
                     display: flex;
                     flex-direction: column;
                     gap: 12px;
-                    color: #013220;
                     cursor: pointer;
-                    border: 2px solid transparent;
+                    border: 1px solid rgba(198, 198, 198, 0.2);
+                    position: relative;
+                    overflow: hidden;
                 }}
-                .card:focus,
                 .card:hover {{
-                    border-color: #013220;
+                    border-color: rgba(198, 198, 198, 0.5);
+                }}
+                .card.kpi-alert::after {{
+                    content: "";
+                    position: absolute;
+                    inset: -2px;
+                    border-radius: 20px;
+                    border: 1px solid rgba(198, 198, 198, 0.7);
+                    box-shadow: 0 0 26px rgba(35, 255, 180, 0.6);
+                    animation: blink 0.45s ease-in-out 2;
                 }}
                 .value {{
-                    font-size: 48px;
+                    font-size: clamp(36px, 6vw, 52px);
                     font-weight: 700;
+                    color: #e5e5e5;
                 }}
                 .label {{
                     font-size: 14px;
                     letter-spacing: 0.12em;
                     text-transform: uppercase;
-                    color: #013220;
+                    color: #c6c6c6;
                 }}
-                .tables {{
-                    margin-top: 32px;
+                .filters {{
+                    margin-top: 28px;
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 16px;
+                    align-items: center;
+                }}
+                .filter-group {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 10px;
+                    align-items: center;
+                }}
+                .filter-label {{
+                    font-size: 12px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.12em;
+                    color: #c6c6c6;
+                }}
+                .filter-button {{
+                    border: 1px solid rgba(198, 198, 198, 0.3);
+                    background: rgba(11, 15, 13, 0.7);
+                    color: #e5e5e5;
+                    padding: 8px 14px;
+                    border-radius: 999px;
+                    cursor: pointer;
+                    font-size: 13px;
+                }}
+                .filter-button.active {{
+                    border-color: rgba(35, 255, 180, 0.8);
+                    box-shadow: 0 0 16px rgba(35, 255, 180, 0.35);
+                }}
+                .reset-button {{
+                    border: 1px solid rgba(198, 198, 198, 0.4);
+                    background: transparent;
+                    color: #c6c6c6;
+                    padding: 8px 16px;
+                    border-radius: 999px;
+                    cursor: pointer;
+                    font-size: 13px;
+                }}
+                .orders {{
+                    margin-top: 28px;
                     display: grid;
-                    gap: 24px;
+                    gap: 16px;
                 }}
-                .table-card {{
-                    background: #c6c6c6;
-                    border-radius: 16px;
-                    padding: 20px;
-                    color: #013220;
-                    display: none;
+                .order-card {{
+                    border: 1px solid rgba(198, 198, 198, 0.2);
+                    border-radius: 18px;
+                    padding: 18px 20px;
+                    background: rgba(0, 0, 0, 0.5);
+                    display: grid;
+                    gap: 12px;
+                    cursor: pointer;
+                    transition: border 0.2s ease, box-shadow 0.2s ease;
                 }}
-                .table-card.active {{
+                .order-card:hover {{
+                    border-color: rgba(198, 198, 198, 0.45);
+                    box-shadow: 0 0 24px rgba(35, 255, 180, 0.15);
+                }}
+                .order-card.new-flash {{
+                    animation: glow 0.5s ease-in-out 1;
+                }}
+                .order-header {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    justify-content: space-between;
+                    align-items: center;
+                    gap: 12px;
+                }}
+                .order-number {{
+                    font-size: 18px;
+                    font-weight: 600;
+                }}
+                .status-badge {{
+                    padding: 4px 10px;
+                    border-radius: 999px;
+                    font-size: 12px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.08em;
+                    border: 1px solid transparent;
+                }}
+                .status-new {{
+                    color: #9cffd6;
+                    border-color: rgba(156, 255, 214, 0.4);
+                }}
+                .status-paid {{
+                    color: #23ffb4;
+                    border-color: rgba(35, 255, 180, 0.5);
+                }}
+                .status-cdek {{
+                    color: #e5e5e5;
+                    border-color: rgba(229, 229, 229, 0.5);
+                }}
+                .status-warning {{
+                    color: #ffd166;
+                    border-color: rgba(255, 209, 102, 0.5);
+                }}
+                .status-error {{
+                    color: #ff5f5f;
+                    border-color: rgba(255, 95, 95, 0.5);
+                }}
+                .order-meta {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                    gap: 8px 16px;
+                    font-size: 13px;
+                    color: #c6c6c6;
+                }}
+                .order-meta span {{
                     display: block;
                 }}
-                table {{
-                    width: 100%;
-                    border-collapse: collapse;
-                    margin-top: 12px;
+                .order-actions {{
+                    display: flex;
+                    justify-content: flex-end;
                 }}
-                th,
-                td {{
-                    padding: 12px 10px;
-                    text-align: left;
-                    border-bottom: 1px solid rgba(1, 50, 32, 0.2);
-                    font-size: 14px;
-                }}
-                th {{
-                    text-transform: uppercase;
-                    font-size: 12px;
-                    letter-spacing: 0.08em;
-                }}
-                a {{
-                    color: #013220;
-                    font-weight: 600;
+                .order-link {{
+                    border: 1px solid rgba(198, 198, 198, 0.4);
+                    background: rgba(15, 61, 46, 0.5);
+                    color: #e5e5e5;
+                    padding: 8px 16px;
+                    border-radius: 999px;
+                    font-size: 13px;
                     text-decoration: none;
                 }}
-                .empty-row td {{
+                .empty-state {{
+                    padding: 24px;
+                    border-radius: 16px;
+                    border: 1px dashed rgba(198, 198, 198, 0.3);
                     text-align: center;
-                    font-style: italic;
+                    color: #c6c6c6;
                 }}
                 .warning {{
                     margin-top: 24px;
-                    padding: 16px 20px;
-                    border-radius: 12px;
-                    background: #ffd166;
-                    color: #013220;
-                    font-size: 14px;
+                    padding: 14px 18px;
+                    border-radius: 14px;
+                    border: 1px solid rgba(255, 209, 102, 0.6);
+                    background: rgba(255, 209, 102, 0.12);
+                    color: #ffd166;
+                    font-size: 13px;
+                }}
+                .warning strong {{
+                    color: #ffe5a6;
+                }}
+                .stale {{
+                    color: #ffd166;
+                }}
+                @keyframes glow {{
+                    0% {{ box-shadow: 0 0 0 rgba(35, 255, 180, 0.0); }}
+                    50% {{ box-shadow: 0 0 28px rgba(35, 255, 180, 0.6); }}
+                    100% {{ box-shadow: 0 0 0 rgba(35, 255, 180, 0.0); }}
+                }}
+                @keyframes blink {{
+                    0%, 100% {{ opacity: 1; }}
+                    50% {{ opacity: 0.3; }}
+                }}
+                @media (max-width: 768px) {{
+                    .container {{
+                        padding: 24px 16px 48px;
+                    }}
+                    .order-actions {{
+                        justify-content: flex-start;
+                    }}
                 }}
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>Лендинг статистики заказов</h1>
+                <h1>CASHER OPS DASHBOARD</h1>
                 <div class="subtitle">
-                    Здесь отображаются новые заказы и заказы, собранные в СДЭК.
+                    Операционный контроль заказов CASHER в реальном времени: новые заявки,
+                    статусы и визуальный контроль.
                 </div>
                 <div class="meta">
                     <span>Обновлено: <strong id="updated-at">{escape(updated_text)}</strong></span>
-                    <span>Статус: <strong id="status-text">{escape(status_text)}</strong></span>
+                    <span class="status-pill">Статус: <strong id="status-text">{escape(status_text)}</strong></span>
                     <button class="refresh-button" id="refresh-button" type="button">Обновить</button>
                 </div>
                 <div class="grid">
-                    <button class="card" type="button" data-target="new-orders-table">
+                    <button class="card" type="button" id="kpi-new-orders">
                         <div class="value" id="new-orders-count">{new_orders}</div>
                         <div class="label">НОВЫЕ ЗАКАЗЫ</div>
                     </button>
-                    <button class="card" type="button" data-target="cdek-orders-table">
+                    <button class="card" type="button" id="kpi-cdek-orders">
                         <div class="value" id="cdek-orders-count">{cdek_orders}</div>
                         <div class="label">ОТПРАВЛЕНО СДЕК</div>
                     </button>
                 </div>
-                <div class="tables">
-                    <div class="table-card" id="new-orders-table">
-                        <h2>Новые заказы</h2>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Заказ</th>
-                                    <th>Статус</th>
-                                    <th>Дата</th>
-                                    <th>Сумма</th>
-                                </tr>
-                            </thead>
-                            <tbody id="new-orders-body">
-                                {_render_table_rows(new_order_rows)}
-                            </tbody>
-                        </table>
+                <div class="filters">
+                    <div class="filter-group" data-filter-group="period">
+                        <span class="filter-label">Период</span>
+                        <button class="filter-button active" type="button" data-period="today">Сегодня</button>
+                        <button class="filter-button" type="button" data-period="week">7 дней</button>
+                        <button class="filter-button" type="button" data-period="all">Всё</button>
                     </div>
-                    <div class="table-card" id="cdek-orders-table">
-                        <h2>Отправлено СДЭК</h2>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Заказ</th>
-                                    <th>Статус</th>
-                                    <th>Дата</th>
-                                    <th>Сумма</th>
-                                </tr>
-                            </thead>
-                            <tbody id="cdek-orders-body">
-                                {_render_table_rows(cdek_order_rows)}
-                            </tbody>
-                        </table>
+                    <div class="filter-group" data-filter-group="status">
+                        <span class="filter-label">Статус</span>
+                        <button class="filter-button active" type="button" data-status="all">Все</button>
+                        <button class="filter-button" type="button" data-status="new">Новые</button>
+                        <button class="filter-button" type="button" data-status="cdek">СДЭК</button>
                     </div>
+                    <button class="reset-button" id="reset-filters" type="button">Сбросить</button>
+                </div>
+                <div class="orders" id="orders-list">
+                    <div class="empty-state">Загрузка данных...</div>
                 </div>
                 {warning_block}
                 {empty_block}
             </div>
             <script>
-                const cards = document.querySelectorAll('[data-target]');
+                const kpiNewOrders = document.getElementById('kpi-new-orders');
+                const kpiCdekOrders = document.getElementById('kpi-cdek-orders');
                 const refreshButton = document.getElementById('refresh-button');
                 const statusText = document.getElementById('status-text');
                 const updatedAt = document.getElementById('updated-at');
                 const newOrdersCount = document.getElementById('new-orders-count');
                 const cdekOrdersCount = document.getElementById('cdek-orders-count');
-                const newOrdersBody = document.getElementById('new-orders-body');
-                const cdekOrdersBody = document.getElementById('cdek-orders-body');
+                const ordersList = document.getElementById('orders-list');
+                const resetFilters = document.getElementById('reset-filters');
+                const periodButtons = document.querySelectorAll('[data-period]');
+                const statusButtons = document.querySelectorAll('[data-status]');
 
-                const renderRows = (rows) => {{
-                    if (!rows.length) {{
-                        return '<tr class="empty-row"><td colspan="4">Нет заказов</td></tr>';
+                const initialPayload = {initial_payload};
+                let currentPayload = initialPayload;
+                let knownOrderIds = new Set((initialPayload.orders || []).map((order) => order.id));
+                let activeFilters = {{
+                    period: 'today',
+                    status: 'all',
+                }};
+
+                const formatDate = (value) => {{
+                    if (!value) return 'не указана';
+                    return value.replace('T', ' ').split('.')[0];
+                }};
+
+                const getStatusClass = (state) => {{
+                    const value = (state || '').toLowerCase();
+                    if (value.includes('ошиб') || value.includes('api')) return 'status-error';
+                    if (value.includes('оплачен')) return 'status-paid';
+                    if (value.includes('сдек')) return 'status-cdek';
+                    if (value.includes('нов') || value.includes('принят') || value.includes('обработ')) return 'status-new';
+                    if (value.includes('проблем')) return 'status-warning';
+                    return 'status-warning';
+                }};
+
+                const isNewOrder = (state) => {{
+                    const value = (state || '').toLowerCase();
+                    return (
+                        value.includes('нов') ||
+                        value.includes('принят') ||
+                        value.includes('оплачен') ||
+                        value.includes('обработ')
+                    ) && !value.includes('сдек');
+                }};
+
+                const filterByPeriod = (orders) => {{
+                    if (activeFilters.period === 'all') return orders;
+                    const now = new Date();
+                    return orders.filter((order) => {{
+                        if (!order.moment) return false;
+                        const orderDate = new Date(order.moment);
+                        if (activeFilters.period === 'today') {{
+                            return (
+                                orderDate.getDate() === now.getDate() &&
+                                orderDate.getMonth() === now.getMonth() &&
+                                orderDate.getFullYear() === now.getFullYear()
+                            );
+                        }}
+                        const diffDays = (now - orderDate) / (1000 * 60 * 60 * 24);
+                        return diffDays <= 7;
+                    }});
+                }};
+
+                const filterByStatus = (orders) => {{
+                    if (activeFilters.status === 'all') return orders;
+                    if (activeFilters.status === 'cdek') {{
+                        return orders.filter((order) => (order.state || '').toLowerCase().includes('сдек'));
                     }}
-                    return rows.map((row) => `
-                        <tr>
-                            <td><a href="${{row.link}}" target="_blank" rel="noreferrer">${{row.name}}</a></td>
-                            <td>${{row.state}}</td>
-                            <td>${{row.moment}}</td>
-                            <td>${{row.total}}</td>
-                        </tr>
-                    `).join('');
+                    if (activeFilters.status === 'new') {{
+                        return orders.filter((order) => isNewOrder(order.state));
+                    }}
+                    return orders;
+                }};
+
+                const renderOrders = (orders, highlightedIds = new Set()) => {{
+                    if (!orders.length) {{
+                        ordersList.innerHTML = '<div class="empty-state">Нет заказов по выбранным фильтрам</div>';
+                        return;
+                    }}
+                    ordersList.innerHTML = orders.map((order) => {{
+                        const statusClass = getStatusClass(order.state);
+                        const isHighlighted = highlightedIds.has(order.id);
+                        return `
+                            <div class="order-card ${{statusClass}} ${{isHighlighted ? 'new-flash' : ''}}" data-link="${{order.link || '#'}}">
+                                <div class="order-header">
+                                    <div class="order-number">${{order.name || 'без номера'}}</div>
+                                    <span class="status-badge ${{statusClass}}">${{order.state || 'не указан'}}</span>
+                                </div>
+                                <div class="order-meta">
+                                    <span>Дата: ${{formatDate(order.moment)}}</span>
+                                    <span>Город: ${{order.city || 'не указан'}}</span>
+                                    <span>Получатель: ${{order.recipient || 'не указан'}}</span>
+                                </div>
+                                <div class="order-actions">
+                                    <a class="order-link" href="${{order.link || '#'}}" target="_blank" rel="noreferrer">Открыть в МойСклад</a>
+                                </div>
+                            </div>
+                        `;
+                    }}).join('');
+
+                    document.querySelectorAll('.order-card').forEach((card) => {{
+                        card.addEventListener('click', (event) => {{
+                            if (event.target.closest('a')) return;
+                            const link = card.getAttribute('data-link');
+                            if (link) {{
+                                window.open(link, '_blank', 'noreferrer');
+                            }}
+                        }});
+                    }});
+                }};
+
+                const applyFilters = (orders, highlightedIds) => {{
+                    const filtered = filterByStatus(filterByPeriod(orders));
+                    const sorted = filtered.sort((a, b) => {{
+                        const aIsNew = isNewOrder(a.state) ? 1 : 0;
+                        const bIsNew = isNewOrder(b.state) ? 1 : 0;
+                        if (aIsNew !== bIsNew) {{
+                            return bIsNew - aIsNew;
+                        }}
+                        const aTime = a.moment ? new Date(a.moment).getTime() : 0;
+                        const bTime = b.moment ? new Date(b.moment).getTime() : 0;
+                        return bTime - aTime;
+                    }});
+                    renderOrders(sorted, highlightedIds);
+                }};
+
+                const updateKpi = (payload, previousNewCount = 0) => {{
+                    const newCount = payload.stats?.new_orders ?? 0;
+                    newOrdersCount.textContent = newCount;
+                    cdekOrdersCount.textContent = payload.stats?.cdek_orders ?? 0;
+                    if (payload.updated_at) {{
+                        updatedAt.textContent = formatDate(payload.updated_at);
+                    }}
+                    statusText.textContent = payload.stale ? 'Данные устарели' : 'Данные обновлены';
+                    statusText.classList.toggle('stale', Boolean(payload.stale));
+
+                    if (newCount > previousNewCount) {{
+                        kpiNewOrders.classList.add('kpi-alert');
+                        setTimeout(() => kpiNewOrders.classList.remove('kpi-alert'), 900);
+                    }}
                 }};
 
                 const updateFromPayload = (payload) => {{
                     if (!payload || !payload.stats) return;
-                    newOrdersCount.textContent = payload.stats.new_orders ?? 0;
-                    cdekOrdersCount.textContent = payload.stats.cdek_orders ?? 0;
-                    if (payload.updated_at) {{
-                        updatedAt.textContent = payload.updated_at.replace('T', ' ').split('.')[0];
-                    }}
-                    statusText.textContent = payload.stale ? 'Данные устарели' : 'Данные обновлены';
-                    const orders = payload.orders || [];
-                    const newOrders = orders.filter((order) => {{
-                        const state = (order.state || '').toLowerCase();
-                        return state.includes('сдек') === false && (
-                            state.includes('нов') ||
-                            state.includes('принят') ||
-                            state.includes('оплачен') ||
-                            state.includes('обработ')
-                        );
-                    }});
-                    const cdekOrders = orders.filter((order) => (order.state || '').toLowerCase().includes('сдек'));
-                    newOrdersBody.innerHTML = renderRows(newOrders.map((order) => ({{
-                        name: order.name || 'без номера',
-                        state: order.state || 'не указан',
-                        moment: order.moment ? order.moment.replace('T', ' ').split('.')[0] : 'не указана',
-                        total: order.sum ? (order.sum / 100).toFixed(2) : 'не указана',
-                        link: order.link || '#',
-                    }})));
-                    cdekOrdersBody.innerHTML = renderRows(cdekOrders.map((order) => ({{
-                        name: order.name || 'без номера',
-                        state: order.state || 'не указан',
-                        moment: order.moment ? order.moment.replace('T', ' ').split('.')[0] : 'не указана',
-                        total: order.sum ? (order.sum / 100).toFixed(2) : 'не указана',
-                        link: order.link || '#',
-                    }})));
-                }};
+                    const previousNewCount = currentPayload.stats?.new_orders ?? 0;
+                    updateKpi(payload, previousNewCount);
 
-                cards.forEach((card) => {{
-                    card.addEventListener('click', () => {{
-                        const targetId = card.getAttribute('data-target');
-                        if (!targetId) return;
-                        const target = document.getElementById(targetId);
-                        if (!target) return;
-                        const isActive = target.classList.contains('active');
-                        document.querySelectorAll('.table-card').forEach((table) => {{
-                            table.classList.remove('active');
-                        }});
-                        if (!isActive) {{
-                            target.classList.add('active');
+                    const orders = payload.orders || [];
+                    const newIds = new Set(orders.map((order) => order.id));
+                    const highlightedIds = new Set();
+                    newIds.forEach((id) => {{
+                        if (id && !knownOrderIds.has(id)) {{
+                            highlightedIds.add(id);
                         }}
                     }});
+                    knownOrderIds = newIds;
+                    currentPayload = payload;
+                    applyFilters(orders, highlightedIds);
+                }};
+
+                const setActiveButton = (buttons, activeValue, dataAttr) => {{
+                    buttons.forEach((button) => {{
+                        const value = button.getAttribute(dataAttr);
+                        button.classList.toggle('active', value === activeValue);
+                    }});
+                }};
+
+                periodButtons.forEach((button) => {{
+                    button.addEventListener('click', () => {{
+                        activeFilters.period = button.getAttribute('data-period');
+                        setActiveButton(periodButtons, activeFilters.period, 'data-period');
+                        applyFilters(currentPayload.orders || [], new Set());
+                    }});
+                }});
+
+                statusButtons.forEach((button) => {{
+                    button.addEventListener('click', () => {{
+                        activeFilters.status = button.getAttribute('data-status');
+                        setActiveButton(statusButtons, activeFilters.status, 'data-status');
+                        applyFilters(currentPayload.orders || [], new Set());
+                    }});
+                }});
+
+                resetFilters.addEventListener('click', () => {{
+                    activeFilters = {{ period: 'today', status: 'all' }};
+                    setActiveButton(periodButtons, activeFilters.period, 'data-period');
+                    setActiveButton(statusButtons, activeFilters.status, 'data-status');
+                    applyFilters(currentPayload.orders || [], new Set());
+                }});
+
+                kpiNewOrders.addEventListener('click', () => {{
+                    activeFilters.status = 'new';
+                    setActiveButton(statusButtons, activeFilters.status, 'data-status');
+                    applyFilters(currentPayload.orders || [], new Set());
+                    ordersList.scrollIntoView({{ behavior: 'smooth' }});
+                }});
+
+                kpiCdekOrders.addEventListener('click', () => {{
+                    activeFilters.status = 'cdek';
+                    setActiveButton(statusButtons, activeFilters.status, 'data-status');
+                    applyFilters(currentPayload.orders || [], new Set());
+                    ordersList.scrollIntoView({{ behavior: 'smooth' }});
                 }});
 
                 refreshButton.addEventListener('click', async () => {{
@@ -838,6 +1089,8 @@ def _render_landing_page(
                         refreshButton.disabled = false;
                     }}
                 }});
+
+                updateFromPayload(initialPayload);
 
                 const eventSource = new EventSource('/events');
                 eventSource.onmessage = (event) => {{
@@ -931,9 +1184,8 @@ def health() -> Dict[str, str]:
 
 @app.get("/", response_class=HTMLResponse)
 def landing() -> HTMLResponse:
-    new_order_rows: List[Dict[str, str]] = []
-    cdek_order_rows: List[Dict[str, str]] = []
     counts = {"new_orders": 0, "cdek_orders": 0}
+    orders: List[Dict[str, Any]] = []
     updated_at: Optional[str] = None
     stale = False
     has_cache = False
@@ -949,28 +1201,18 @@ def landing() -> HTMLResponse:
                 "new_orders": int(stats.get("new_orders", 0)),
                 "cdek_orders": int(stats.get("cdek_orders", 0)),
             }
-            orders = cache.get("orders", [])
-            new_orders = [
-                _order_row_cached(order)
-                for order in orders
-                if is_new_order(str(order.get("state") or ""))
-                and not is_cdek_state(str(order.get("state") or ""))
-            ]
-            cdek_orders = [
-                _order_row_cached(order)
-                for order in orders
-                if is_cdek_state(str(order.get("state") or ""))
-            ]
-            new_order_rows = sorted(new_orders, key=lambda row: row["moment"], reverse=True)
-            cdek_order_rows = sorted(cdek_orders, key=lambda row: row["moment"], reverse=True)
+            orders = sorted(
+                cache.get("orders", []),
+                key=lambda order: order.get("moment") or "",
+                reverse=True,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to read cache: %s", exc)
 
     html = _render_landing_page(
         new_orders=counts["new_orders"],
         cdek_orders=counts["cdek_orders"],
-        new_order_rows=new_order_rows,
-        cdek_order_rows=cdek_order_rows,
+        orders=orders,
         updated_at=updated_at,
         stale=stale,
         has_cache=has_cache,
