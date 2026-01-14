@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
@@ -159,10 +159,17 @@ def fetch_assortment_name(href: str) -> Optional[str]:
     return fetch_entity(href).get("name")
 
 
-def fetch_customer_orders(limit: int = 100) -> List[Dict[str, Any]]:
+def _moysklad_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str, Any]]:
     headers = _moysklad_headers()
     if not headers:
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+
+    since = datetime.now(timezone.utc) - timedelta(days=max_days)
+    filter_since = f"moment>={_moysklad_datetime(since)}"
 
     orders: List[Dict[str, Any]] = []
     offset = 0
@@ -170,7 +177,12 @@ def fetch_customer_orders(limit: int = 100) -> List[Dict[str, Any]]:
         response = requests.get(
             "https://api.moysklad.ru/api/remap/1.2/entity/customerorder",
             headers=headers,
-            params={"limit": limit, "offset": offset, "expand": "state"},
+            params={
+                "limit": limit,
+                "offset": offset,
+                "expand": "state",
+                "filter": filter_since,
+            },
             timeout=10,
         )
         response.raise_for_status()
@@ -363,12 +375,26 @@ def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
     state_name = _get_state_name(order)
     agent_info = order.get("agent")
     recipient = None
+    phone = order.get("phone")
+    email = order.get("email")
     if isinstance(agent_info, dict):
         recipient = agent_info.get("name")
+        phone = phone or agent_info.get("phone")
+        email = email or agent_info.get("email")
     shipment_full = order.get("shipmentAddressFull")
     city = None
+    address = None
+    recipient_override = None
     if isinstance(shipment_full, dict):
         city = shipment_full.get("city") or shipment_full.get("region")
+        address = shipment_full.get("address")
+        recipient_override = shipment_full.get("recipient")
+    if not city:
+        shipment_address = order.get("shipmentAddress")
+        if isinstance(shipment_address, str) and shipment_address:
+            city = shipment_address.split(",")[0].strip() or None
+        if not address and isinstance(shipment_address, str):
+            address = shipment_address
     return {
         "id": order.get("id") or "",
         "name": order.get("name") or "без номера",
@@ -376,7 +402,10 @@ def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
         "moment": order.get("moment"),
         "sum": order.get("sum"),
         "city": city,
-        "recipient": recipient,
+        "recipient": recipient_override or recipient,
+        "phone": phone,
+        "email": email,
+        "address": address,
         "link": _order_link(order),
     }
 
@@ -564,6 +593,8 @@ def _render_landing_page(
                     max-width: 1200px;
                     margin: 0 auto;
                     padding: 32px 20px 64px;
+                    position: relative;
+                    z-index: 1;
                 }}
                 h1 {{
                     font-size: clamp(24px, 4vw, 36px);
@@ -598,7 +629,7 @@ def _render_landing_page(
                     border-radius: 999px;
                     border: 1px solid rgba(198, 198, 198, 0.3);
                     background: rgba(15, 61, 46, 0.4);
-                    box-shadow: 0 0 18px rgba(35, 255, 180, 0.15);
+                    box-shadow: 0 0 22px rgba(35, 255, 180, 0.25);
                 }}
                 .refresh-button {{
                     border: 1px solid rgba(198, 198, 198, 0.4);
@@ -615,7 +646,7 @@ def _render_landing_page(
                     cursor: progress;
                 }}
                 .refresh-button:not(:disabled):hover {{
-                    box-shadow: 0 0 18px rgba(35, 255, 180, 0.35);
+                    box-shadow: 0 0 24px rgba(35, 255, 180, 0.55);
                     transform: translateY(-1px);
                 }}
                 .grid {{
@@ -627,7 +658,7 @@ def _render_landing_page(
                     background: rgba(11, 15, 13, 0.7);
                     border-radius: 18px;
                     padding: 26px;
-                    box-shadow: 0 0 24px rgba(35, 255, 180, 0.1);
+                    box-shadow: 0 0 30px rgba(35, 255, 180, 0.2);
                     display: flex;
                     flex-direction: column;
                     gap: 12px;
@@ -689,7 +720,7 @@ def _render_landing_page(
                 }}
                 .filter-button.active {{
                     border-color: rgba(35, 255, 180, 0.8);
-                    box-shadow: 0 0 16px rgba(35, 255, 180, 0.35);
+                    box-shadow: 0 0 20px rgba(35, 255, 180, 0.45);
                 }}
                 .reset-button {{
                     border: 1px solid rgba(198, 198, 198, 0.4);
@@ -717,7 +748,7 @@ def _render_landing_page(
                 }}
                 .order-card:hover {{
                     border-color: rgba(198, 198, 198, 0.45);
-                    box-shadow: 0 0 24px rgba(35, 255, 180, 0.15);
+                    box-shadow: 0 0 28px rgba(35, 255, 180, 0.25);
                 }}
                 .order-card.new-flash {{
                     animation: glow 0.5s ease-in-out 1;
@@ -784,6 +815,36 @@ def _render_landing_page(
                     font-size: 13px;
                     text-decoration: none;
                 }}
+                .note {{
+                    margin-top: 10px;
+                    font-size: 12px;
+                    color: #c6c6c6;
+                    letter-spacing: 0.05em;
+                    text-transform: uppercase;
+                }}
+                .glitter {{
+                    position: fixed;
+                    inset: 0;
+                    pointer-events: none;
+                    background-image:
+                        radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.12) 0, transparent 2px),
+                        radial-gradient(circle at 70% 20%, rgba(255, 255, 255, 0.08) 0, transparent 2px),
+                        radial-gradient(circle at 40% 80%, rgba(255, 255, 255, 0.1) 0, transparent 2px),
+                        radial-gradient(circle at 80% 60%, rgba(255, 255, 255, 0.07) 0, transparent 2px);
+                    opacity: 0.35;
+                    mix-blend-mode: screen;
+                    animation: glitter 6s ease-in-out infinite;
+                }}
+                .glitter::after {{
+                    content: "";
+                    position: absolute;
+                    inset: 0;
+                    background-image:
+                        radial-gradient(circle at 10% 50%, rgba(220, 220, 220, 0.12) 0, transparent 2px),
+                        radial-gradient(circle at 90% 40%, rgba(230, 230, 230, 0.1) 0, transparent 2px);
+                    opacity: 0.4;
+                    animation: glitter 8s ease-in-out infinite reverse;
+                }}
                 .empty-state {{
                     padding: 24px;
                     border-radius: 16px;
@@ -815,6 +876,11 @@ def _render_landing_page(
                     0%, 100% {{ opacity: 1; }}
                     50% {{ opacity: 0.3; }}
                 }}
+                @keyframes glitter {{
+                    0% {{ opacity: 0.25; }}
+                    50% {{ opacity: 0.5; }}
+                    100% {{ opacity: 0.25; }}
+                }}
                 @media (max-width: 768px) {{
                     .container {{
                         padding: 24px 16px 48px;
@@ -826,12 +892,14 @@ def _render_landing_page(
             </style>
         </head>
         <body>
+            <div class="glitter" aria-hidden="true"></div>
             <div class="container">
                 <h1>CASHER OPS DASHBOARD</h1>
                 <div class="subtitle">
                     Операционный контроль заказов CASHER в реальном времени: новые заявки,
                     статусы и визуальный контроль.
                 </div>
+                <div class="note">Данные загружаются максимум за последние 7 дней.</div>
                 <div class="meta">
                     <span>Обновлено: <strong id="updated-at">{escape(updated_text)}</strong></span>
                     <span class="status-pill">Статус: <strong id="status-text">{escape(status_text)}</strong></span>
@@ -851,8 +919,8 @@ def _render_landing_page(
                     <div class="filter-group" data-filter-group="period">
                         <span class="filter-label">Период</span>
                         <button class="filter-button active" type="button" data-period="today">Сегодня</button>
+                        <button class="filter-button" type="button" data-period="three_days">3 дня</button>
                         <button class="filter-button" type="button" data-period="week">7 дней</button>
-                        <button class="filter-button" type="button" data-period="all">Всё</button>
                     </div>
                     <div class="filter-group" data-filter-group="status">
                         <span class="filter-label">Статус</span>
@@ -891,7 +959,16 @@ def _render_landing_page(
 
                 const formatDate = (value) => {{
                     if (!value) return 'не указана';
-                    return value.replace('T', ' ').split('.')[0];
+                    const parsed = new Date(value);
+                    if (Number.isNaN(parsed.getTime())) return value;
+                    return parsed.toLocaleString('ru-RU');
+                }};
+
+                const formatMoney = (value) => {{
+                    if (value === null || value === undefined) return 'не указана';
+                    const normalized = Number(value) / 100;
+                    if (Number.isNaN(normalized)) return 'не указана';
+                    return `${{normalized.toFixed(2)}} руб.`;
                 }};
 
                 const getStatusClass = (state) => {{
@@ -915,7 +992,6 @@ def _render_landing_page(
                 }};
 
                 const filterByPeriod = (orders) => {{
-                    if (activeFilters.period === 'all') return orders;
                     const now = new Date();
                     return orders.filter((order) => {{
                         if (!order.moment) return false;
@@ -928,6 +1004,9 @@ def _render_landing_page(
                             );
                         }}
                         const diffDays = (now - orderDate) / (1000 * 60 * 60 * 24);
+                        if (activeFilters.period === 'three_days') {{
+                            return diffDays <= 3;
+                        }}
                         return diffDays <= 7;
                     }});
                 }};
@@ -952,7 +1031,7 @@ def _render_landing_page(
                         const statusClass = getStatusClass(order.state);
                         const isHighlighted = highlightedIds.has(order.id);
                         return `
-                            <div class="order-card ${{statusClass}} ${{isHighlighted ? 'new-flash' : ''}}" data-link="${{order.link || '#'}}">
+                            <div class="order-card ${{isHighlighted ? 'new-flash' : ''}}" data-link="${{order.link || '#'}}">
                                 <div class="order-header">
                                     <div class="order-number">${{order.name || 'без номера'}}</div>
                                     <span class="status-badge ${{statusClass}}">${{order.state || 'не указан'}}</span>
@@ -961,6 +1040,10 @@ def _render_landing_page(
                                     <span>Дата: ${{formatDate(order.moment)}}</span>
                                     <span>Город: ${{order.city || 'не указан'}}</span>
                                     <span>Получатель: ${{order.recipient || 'не указан'}}</span>
+                                    <span>Телефон: ${{order.phone || 'не указан'}}</span>
+                                    <span>Email: ${{order.email || 'не указан'}}</span>
+                                    <span>Адрес: ${{order.address || 'не указан'}}</span>
+                                    <span>Сумма: ${{formatMoney(order.sum)}}</span>
                                 </div>
                                 <div class="order-actions">
                                     <a class="order-link" href="${{order.link || '#'}}" target="_blank" rel="noreferrer">Открыть в МойСклад</a>
@@ -1174,6 +1257,7 @@ async def _process_webhook_event(href: str) -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     _ensure_cache_dir()
+    await refresh_cache("startup")
     asyncio.create_task(auto_refresh_loop())
 
 
