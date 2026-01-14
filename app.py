@@ -888,6 +888,33 @@ async def auto_refresh_loop() -> None:
         await asyncio.sleep(60)
 
 
+async def _process_webhook_event(href: str) -> None:
+    try:
+        order = await anyio.to_thread.run_sync(fetch_order_details, href)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch order details: %s", exc)
+        return
+
+    cache: Optional[Dict[str, Any]] = None
+    try:
+        order_payload = await anyio.to_thread.run_sync(_serialize_order, order)
+        cache = await anyio.to_thread.run_sync(update_cache_with_order, order_payload)
+        _log_stats(cache)
+        await broadcast_event(cache)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to update cache for webhook: %s", exc)
+
+    try:
+        state_name = await anyio.to_thread.run_sync(_get_state_name, order)
+        if is_cdek_state(state_name):
+            message = await anyio.to_thread.run_sync(build_cdek_message, order)
+        else:
+            message = await anyio.to_thread.run_sync(build_message, order)
+        await anyio.to_thread.run_sync(send_telegram_message, message)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to send Telegram notification: %s", exc)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     asyncio.create_task(auto_refresh_loop())
@@ -999,22 +1026,6 @@ async def moysklad_webhook(request: Request) -> JSONResponse:
         href = meta.get("href")
         if not href:
             continue
-
-        try:
-            order = await anyio.to_thread.run_sync(fetch_order_details, href)
-            order_payload = await anyio.to_thread.run_sync(_serialize_order, order)
-            cache = await anyio.to_thread.run_sync(update_cache_with_order, order_payload)
-            _log_stats(cache)
-            await broadcast_event(cache)
-
-            state_name = _get_state_name(order)
-            if is_cdek_state(state_name):
-                message = await anyio.to_thread.run_sync(build_cdek_message, order)
-            else:
-                message = await anyio.to_thread.run_sync(build_message, order)
-            await anyio.to_thread.run_sync(send_telegram_message, message)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Webhook processing failed: %s", exc)
-            continue
+        asyncio.create_task(_process_webhook_event(href))
 
     return JSONResponse({"status": "ok"})
