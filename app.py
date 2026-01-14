@@ -71,7 +71,7 @@ def _format_datetime(value: Optional[str]) -> str:
     parsed = _parse_datetime(value)
     if not parsed:
         return value
-    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    return parsed.strftime("%d.%m.%Y")
 
 
 def _format_money(value: Optional[int]) -> str:
@@ -203,6 +203,8 @@ def extract_order_full_data(order: Dict[str, Any]) -> Dict[str, Any]:
     shipment_full = order.get("shipmentAddressFull")
     shipment_full_data = shipment_full if isinstance(shipment_full, dict) else {}
 
+    delivery_address_attribute = _normalize_text(_get_attribute_value(order, "адрес доставки"))
+
     recipient = _first_non_empty(
         shipment_full_data.get("recipient"),
         _get_attribute_value(order, "получатель"),
@@ -226,6 +228,7 @@ def extract_order_full_data(order: Dict[str, Any]) -> Dict[str, Any]:
 
     address = _first_non_empty(
         _compose_shipment_address(shipment_full_data),
+        delivery_address_attribute,
         _get_attribute_first(
             order,
             "адрес",
@@ -243,6 +246,7 @@ def extract_order_full_data(order: Dict[str, Any]) -> Dict[str, Any]:
         shipment_full_data.get("settlement"),
         shipment_full_data.get("region"),
         _extract_city_from_address(_normalize_text(shipment_full_data.get("address"))),
+        _extract_city_from_address(delivery_address_attribute),
         _get_attribute_first(
             order,
             "город",
@@ -634,12 +638,9 @@ def _event_payload(cache: Dict[str, Any]) -> str:
     updated_at_display = cache.get("updated_at_display")
     if updated_at and not updated_at_display:
         updated_at_display = _format_datetime(str(updated_at))
-    server_now_ms = cache.get("server_msk_now_ms")
-    server_today_start_ms = cache.get("server_msk_today_start_ms")
-    if not server_now_ms or not server_today_start_ms:
-        now_msk = _msk_now()
-        server_now_ms = int(now_msk.timestamp() * 1000)
-        server_today_start_ms = int(_msk_day_start(now_msk).timestamp() * 1000)
+    now_msk = _msk_now()
+    server_now_ms = int(now_msk.timestamp() * 1000)
+    server_today_start_ms = int(_msk_day_start(now_msk).timestamp() * 1000)
     payload = {
         "updated_at": updated_at,
         "updated_at_display": updated_at_display,
@@ -963,6 +964,11 @@ def _render_landing_page(
                     align-items: center;
                     gap: 12px;
                 }}
+                .order-header-actions {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 12px;
+                }}
                 .order-number {{
                     font-size: 18px;
                     font-weight: 600;
@@ -1013,6 +1019,31 @@ def _render_landing_page(
                     gap: 14px 18px;
                     font-size: 13px;
                     color: var(--matte-muted);
+                }}
+                .order-summary {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                    gap: 12px 18px;
+                    font-size: 13px;
+                    color: var(--matte-muted);
+                }}
+                .order-details {{
+                    display: none;
+                    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                    gap: 14px 18px;
+                    font-size: 13px;
+                    color: var(--matte-muted);
+                    border-top: 1px dashed rgba(247, 247, 245, 0.08);
+                    padding-top: 12px;
+                }}
+                .order-card.expanded .order-details {{
+                    display: grid;
+                }}
+                .order-toggle {{
+                    font-size: 11px;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                    color: rgba(247, 247, 245, 0.55);
                 }}
                 .meta-item {{
                     display: flex;
@@ -1189,7 +1220,28 @@ def _render_landing_page(
 
                 const formatDate = (value) => {{
                     if (!value) return 'не указана';
+                    if (value.includes('.')) return value;
+                    const match = value.match(/(\\d{{4}})-(\\d{{2}})-(\\d{{2}})/);
+                    if (match) {{
+                        return `${{match[3]}}.${{match[2]}}.${{match[1]}}`;
+                    }}
                     return value;
+                }};
+
+                const getMskNowMs = () => {{
+                    const localNow = new Date();
+                    const utcMs = localNow.getTime() + localNow.getTimezoneOffset() * 60000;
+                    return utcMs + 3 * 60 * 60 * 1000;
+                }};
+
+                const getMskTodayStartMs = () => {{
+                    const nowMs =
+                        currentPayload?.server_msk_now_ms && !currentPayload?.stale
+                            ? currentPayload.server_msk_now_ms
+                            : getMskNowMs();
+                    const mskDate = new Date(nowMs);
+                    mskDate.setUTCHours(0, 0, 0, 0);
+                    return mskDate.getTime();
                 }};
 
                 const getStatusClass = (state) => {{
@@ -1217,7 +1269,7 @@ def _render_landing_page(
                         if (!order.moment_ms) return false;
                         const orderTime = order.moment_ms;
                         const nowTime = currentPayload.server_msk_now_ms;
-                        const todayStart = currentPayload.server_msk_today_start_ms;
+                        const todayStart = getMskTodayStartMs();
                         if (activeFilters.period === 'today') {{
                             return todayStart ? orderTime >= todayStart : true;
                         }}
@@ -1251,11 +1303,11 @@ def _render_landing_page(
                         const isHighlighted = highlightedIds.has(order.id);
                         const isNew = isNewOrder(order.state);
                         return `
-                            <div class="order-card ${{isNew ? 'new-order' : ''}} ${{isHighlighted ? 'new-flash' : ''}}" data-link="${{order.link || '#'}}">
+                            <div class="order-card ${{isNew ? 'new-order' : ''}} ${{isHighlighted ? 'new-flash' : ''}}" data-order-id="${{order.id || ''}}">
                                 <div class="order-header">
                                     <div class="order-primary">
                                         <div class="order-number">${{order.name || 'без номера'}}</div>
-                                        <div class="order-meta-primary">
+                                        <div class="order-summary">
                                             <div class="meta-item">
                                                 <span class="meta-label">Дата</span>
                                                 <span class="meta-value">${{formatDate(order.moment)}}</span>
@@ -1274,9 +1326,12 @@ def _render_landing_page(
                                             </div>
                                         </div>
                                     </div>
-                                    <span class="status-badge ${{statusClass}}">${{order.state || 'не указан'}}</span>
+                                    <div class="order-header-actions">
+                                        <span class="order-toggle" data-order-toggle>Подробнее</span>
+                                        <span class="status-badge ${{statusClass}}">${{order.state || 'не указан'}}</span>
+                                    </div>
                                 </div>
-                                <div class="order-meta">
+                                <div class="order-details">
                                     <div class="meta-item">
                                         <span class="meta-label">Получатель</span>
                                         <span class="meta-value">${{order.recipient || 'не указан'}}</span>
@@ -1289,8 +1344,6 @@ def _render_landing_page(
                                         <span class="meta-label">Email</span>
                                         <span class="meta-value">${{order.email || 'не указан'}}</span>
                                     </div>
-                                </div>
-                                <div class="order-notes">
                                     <div class="meta-item">
                                         <span class="meta-label">Адрес</span>
                                         <span class="meta-value">${{order.address || 'не указан'}}</span>
@@ -1310,9 +1363,10 @@ def _render_landing_page(
                     document.querySelectorAll('.order-card').forEach((card) => {{
                         card.addEventListener('click', (event) => {{
                             if (event.target.closest('a')) return;
-                            const link = card.getAttribute('data-link');
-                            if (link) {{
-                                window.open(link, '_blank', 'noreferrer');
+                            card.classList.toggle('expanded');
+                            const toggle = card.querySelector('[data-order-toggle]');
+                            if (toggle) {{
+                                toggle.textContent = card.classList.contains('expanded') ? 'Скрыть' : 'Подробнее';
                             }}
                         }});
                     }});
