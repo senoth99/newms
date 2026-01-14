@@ -19,6 +19,7 @@ app = FastAPI(title="MoySklad Telegram Notifier")
 
 CACHE_PATH = "/tmp/orders_cache.json"
 CACHE_TTL_SECONDS = 300
+MSK_TZ = timezone(timedelta(hours=3))
 
 CACHE_LOCK = threading.Lock()
 REFRESH_LOCK = asyncio.Lock()
@@ -30,17 +31,47 @@ logging.basicConfig(level=logging.INFO)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(MSK_TZ).isoformat()
+
+
+def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=MSK_TZ)
+    return parsed.astimezone(MSK_TZ)
+
+
+def _msk_now() -> datetime:
+    return datetime.now(MSK_TZ)
+
+
+def _msk_day_start(value: Optional[datetime] = None) -> datetime:
+    current = value or _msk_now()
+    return current.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _msk_millis(value: Optional[str]) -> Optional[int]:
+    parsed = _parse_datetime(value)
+    if not parsed:
+        return None
+    return int(parsed.timestamp() * 1000)
 
 
 def _format_datetime(value: Optional[str]) -> str:
     if not value:
         return "не указана"
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
+    parsed = _parse_datetime(value)
+    if not parsed:
         return value
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _format_money(value: Optional[int]) -> str:
@@ -169,6 +200,111 @@ def _get_delivery_method(order: Dict[str, Any]) -> str:
     return delivery_method or "не указан"
 
 
+def _get_order_comment(order: Dict[str, Any]) -> str:
+    return (
+        order.get("description")
+        or order.get("shipmentAddressFull", {}).get("comment")
+        or _get_attribute_value(order, "комментарий")
+        or "нет"
+    )
+
+
+def _get_order_address(order: Dict[str, Any]) -> str:
+    shipment_full = order.get("shipmentAddressFull")
+    address = _compose_shipment_address(shipment_full)
+    if not address:
+        address = _normalize_text(order.get("shipmentAddress"))
+    if not address:
+        address = _normalize_text(
+            _get_attribute_first(
+                order,
+                "адрес",
+                "адрес доставки",
+                "адрес получателя",
+                "адрес доставки получателя",
+                "address",
+            )
+        )
+    return address or "не указан"
+
+
+def _get_order_city(order: Dict[str, Any], address: Optional[str]) -> str:
+    shipment_full = order.get("shipmentAddressFull")
+    if address == "не указан":
+        address = None
+    city = None
+    if isinstance(shipment_full, dict):
+        city = _normalize_text(
+            shipment_full.get("city")
+            or shipment_full.get("settlement")
+            or shipment_full.get("region")
+        )
+    if not city and address:
+        city = _extract_city_from_address(address)
+    if not city:
+        city = _normalize_text(
+            _get_attribute_first(
+                order,
+                "город",
+                "город доставки",
+                "населенный пункт",
+                "city",
+            )
+        )
+    return city or "не указан"
+
+
+def _extract_order_fields(order: Dict[str, Any]) -> Dict[str, Any]:
+    agent_details = _get_agent_details(order)
+    agent = agent_details["agent"]
+    agent_phone = agent_details["agent_phone"]
+    agent_email = agent_details["agent_email"]
+    shipment_full = order.get("shipmentAddressFull")
+
+    recipient = (
+        _normalize_text(shipment_full.get("recipient")) if isinstance(shipment_full, dict) else None
+    )
+    if not recipient:
+        recipient = _normalize_text(_get_attribute_value(order, "получатель"))
+    recipient = recipient or agent or "не указан"
+
+    phone = _normalize_text(order.get("phone")) or _normalize_text(agent_phone)
+    if not phone:
+        phone = _normalize_text(_get_attribute_value(order, "телефон"))
+    phone = phone or "не указан"
+
+    email = _normalize_text(order.get("email")) or _normalize_text(agent_email)
+    if not email:
+        email = _normalize_text(_get_attribute_value(order, "email"))
+    email = email or "не указан"
+
+    address = _get_order_address(order)
+    city = _get_order_city(order, address)
+    delivery_method = _get_delivery_method(order)
+    comment = _get_order_comment(order)
+    moment_raw = order.get("moment")
+    moment_display = _format_datetime(moment_raw)
+    sum_display = f"{_format_money(order.get('sum'))} руб."
+
+    return {
+        "state": _get_state_name(order),
+        "moment_raw": moment_raw,
+        "moment_display": moment_display,
+        "moment_ms": _msk_millis(moment_raw),
+        "name": order.get("name") or "без номера",
+        "sum": order.get("sum"),
+        "sum_display": sum_display,
+        "comment": comment,
+        "recipient": recipient,
+        "phone": phone,
+        "email": email,
+        "delivery_method": delivery_method,
+        "address": address,
+        "city": city,
+        "order_link": _order_link(order),
+    }
+
+
 def _moysklad_headers() -> Dict[str, str]:
     token = os.getenv("MS_TOKEN")
     basic_token = os.getenv("MS_BASIC_TOKEN")
@@ -214,7 +350,7 @@ def fetch_assortment_name(href: str) -> Optional[str]:
 
 
 def _moysklad_datetime(value: datetime) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return value.astimezone(MSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str, Any]]:
@@ -222,7 +358,7 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
     if not headers:
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
 
-    since = datetime.now(timezone.utc) - timedelta(days=max_days)
+    since = _msk_now() - timedelta(days=max_days)
     filter_since = f"moment>={_moysklad_datetime(since)}"
 
     orders: List[Dict[str, Any]] = []
@@ -295,50 +431,18 @@ def is_new_order(state: str) -> bool:
 
 
 def build_message(order: Dict[str, Any]) -> str:
-    agent_details = _get_agent_details(order)
-    agent = agent_details["agent"]
-    agent_phone = agent_details["agent_phone"]
-    agent_email = agent_details["agent_email"]
-
-    state = _get_state_name(order)
-    moment = _format_datetime(order.get("moment"))
-    name = order.get("name") or "без номера"
+    fields = _extract_order_fields(order)
+    state = fields["state"]
+    moment = fields["moment_display"]
+    name = fields["name"]
     sum_value = _format_money(order.get("sum"))
-    description = (
-        order.get("description")
-        or order.get("shipmentAddressFull", {}).get("comment")
-        or _get_attribute_value(order, "комментарий")
-        or "нет"
-    )
-    order_id = order.get("id") or "не указан"
-    order_link = (
-        f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
-        if order_id != "не указан"
-        else order.get("meta", {}).get("href")
-    ) or "нет"
-    recipient = (
-        order.get("shipmentAddressFull", {}).get("recipient")
-        or _get_attribute_value(order, "получатель")
-        or agent
-    )
-    phone = (
-        order.get("phone")
-        or agent_phone
-        or _get_attribute_value(order, "телефон")
-        or "не указан"
-    )
-    email = (
-        order.get("email")
-        or agent_email
-        or _get_attribute_value(order, "email")
-        or "не указан"
-    )
-    delivery_method = _get_delivery_method(order)
-    address = (
-        order.get("shipmentAddress")
-        or order.get("shipmentAddressFull", {}).get("address")
-        or "не указан"
-    )
+    description = fields["comment"]
+    order_link = fields["order_link"]
+    recipient = fields["recipient"]
+    phone = fields["phone"]
+    email = fields["email"]
+    delivery_method = fields["delivery_method"]
+    address = fields["address"]
     delivery_link = _get_attribute_value(order, "ссылка на доставку") or "не указана"
     track_number = _get_attribute_value(order, "трек-номер") or "не указан"
 
@@ -368,33 +472,13 @@ def build_message(order: Dict[str, Any]) -> str:
 
 
 def build_cdek_message(order: Dict[str, Any]) -> str:
-    agent_details = _get_agent_details(order)
-    agent = agent_details["agent"]
-    agent_phone = agent_details["agent_phone"]
-    state = _get_state_name(order)
-    name = order.get("name") or "без номера"
-    order_id = order.get("id") or "не указан"
-    order_link = (
-        f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
-        if order_id != "не указан"
-        else order.get("meta", {}).get("href")
-    ) or "нет"
-    recipient = (
-        order.get("shipmentAddressFull", {}).get("recipient")
-        or _get_attribute_value(order, "получатель")
-        or agent
-    )
-    phone = (
-        order.get("phone")
-        or agent_phone
-        or _get_attribute_value(order, "телефон")
-        or "не указан"
-    )
-    address = (
-        order.get("shipmentAddress")
-        or order.get("shipmentAddressFull", {}).get("address")
-        or "не указан"
-    )
+    fields = _extract_order_fields(order)
+    state = fields["state"]
+    name = fields["name"]
+    order_link = fields["order_link"]
+    recipient = fields["recipient"]
+    phone = fields["phone"]
+    address = fields["address"]
     delivery_link = _get_attribute_value(order, "ссылка на доставку") or "не указана"
     track_number = _get_attribute_value(order, "трек-номер") or "не указан"
 
@@ -426,68 +510,23 @@ def send_telegram_message(text: str) -> None:
 
 
 def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
-    state_name = _get_state_name(order)
-    agent_details = _get_agent_details(order)
-    recipient = agent_details.get("agent")
-    phone = order.get("phone") or agent_details.get("agent_phone")
-    email = order.get("email") or agent_details.get("agent_email")
-    shipment_full = order.get("shipmentAddressFull")
-    city = None
-    address = None
-    recipient_override = None
-    if isinstance(shipment_full, dict):
-        city = _normalize_text(
-            shipment_full.get("city")
-            or shipment_full.get("settlement")
-            or shipment_full.get("region")
-        )
-        address = _compose_shipment_address(shipment_full)
-        recipient_override = _normalize_text(shipment_full.get("recipient"))
-        if not city and address:
-            city = _extract_city_from_address(address)
-    if not city:
-        shipment_address = order.get("shipmentAddress")
-        if isinstance(shipment_address, str) and shipment_address:
-            city = _extract_city_from_address(shipment_address)
-        if not address and isinstance(shipment_address, str):
-            address = shipment_address
-    if not recipient_override:
-        recipient_override = _get_attribute_first(order, "получатель", "получатель заказа")
-    if not phone:
-        phone = _get_attribute_first(order, "телефон", "номер телефона")
-    if not email:
-        email = _get_attribute_first(order, "email", "электронная почта")
-    if not city:
-        city = _get_attribute_first(
-            order,
-            "город",
-            "город доставки",
-            "населенный пункт",
-            "city",
-        )
-    if not address:
-        address = _get_attribute_first(
-            order,
-            "адрес",
-            "адрес доставки",
-            "адрес получателя",
-            "адрес доставки получателя",
-            "address",
-        )
-    if not city and address:
-        city = _extract_city_from_address(address)
+    fields = _extract_order_fields(order)
     return {
         "id": order.get("id") or "",
-        "name": order.get("name") or "без номера",
-        "state": state_name,
-        "moment": order.get("moment"),
-        "sum": order.get("sum"),
-        "city": city,
-        "recipient": recipient_override or recipient,
-        "phone": phone,
-        "email": email,
-        "address": address,
-        "link": _order_link(order),
+        "name": fields["name"],
+        "state": fields["state"],
+        "moment": fields["moment_display"],
+        "moment_ms": fields["moment_ms"],
+        "sum": fields["sum"],
+        "sum_display": fields["sum_display"],
+        "city": fields["city"],
+        "recipient": fields["recipient"],
+        "phone": fields["phone"],
+        "email": fields["email"],
+        "delivery_method": fields["delivery_method"],
+        "address": fields["address"],
+        "comment": fields["comment"],
+        "link": fields["order_link"],
     }
 
 
@@ -505,9 +544,14 @@ def _stats_from_orders(orders: List[Dict[str, Any]]) -> Dict[str, int]:
 
 def _cache_payload(orders: List[Dict[str, Any]], updated_at: Optional[str] = None) -> Dict[str, Any]:
     updated = updated_at or _now_iso()
+    now_msk = _msk_now()
+    today_start = _msk_day_start(now_msk)
     stats = _stats_from_orders(orders)
     return {
         "updated_at": updated,
+        "updated_at_display": _format_datetime(updated),
+        "server_msk_now_ms": int(now_msk.timestamp() * 1000),
+        "server_msk_today_start_ms": int(today_start.timestamp() * 1000),
         "ttl_seconds": CACHE_TTL_SECONDS,
         "stats": stats,
         "orders": orders,
@@ -585,11 +629,10 @@ def cache_is_stale(cache: Dict[str, Any]) -> bool:
     ttl = cache.get("ttl_seconds", CACHE_TTL_SECONDS)
     if not updated_at:
         return True
-    try:
-        parsed = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
-    except ValueError:
+    parsed = _parse_datetime(str(updated_at))
+    if not parsed:
         return True
-    now = datetime.now(timezone.utc)
+    now = _msk_now()
     return (now - parsed).total_seconds() > int(ttl)
 
 
@@ -606,8 +649,21 @@ def _log_stats(cache: Dict[str, Any]) -> None:
 
 
 def _event_payload(cache: Dict[str, Any]) -> str:
+    updated_at = cache.get("updated_at")
+    updated_at_display = cache.get("updated_at_display")
+    if updated_at and not updated_at_display:
+        updated_at_display = _format_datetime(str(updated_at))
+    server_now_ms = cache.get("server_msk_now_ms")
+    server_today_start_ms = cache.get("server_msk_today_start_ms")
+    if not server_now_ms or not server_today_start_ms:
+        now_msk = _msk_now()
+        server_now_ms = int(now_msk.timestamp() * 1000)
+        server_today_start_ms = int(_msk_day_start(now_msk).timestamp() * 1000)
     payload = {
-        "updated_at": cache.get("updated_at"),
+        "updated_at": updated_at,
+        "updated_at_display": updated_at_display,
+        "server_msk_now_ms": server_now_ms,
+        "server_msk_today_start_ms": server_today_start_ms,
         "ttl_seconds": cache.get("ttl_seconds", CACHE_TTL_SECONDS),
         "stats": cache.get("stats", {}),
         "orders": cache.get("orders", []),
@@ -647,6 +703,9 @@ def _render_landing_page(
     initial_payload = _safe_json_dumps(
         {
             "updated_at": updated_at,
+            "updated_at_display": updated_text if updated_at else None,
+            "server_msk_now_ms": int(_msk_now().timestamp() * 1000),
+            "server_msk_today_start_ms": int(_msk_day_start().timestamp() * 1000),
             "ttl_seconds": CACHE_TTL_SECONDS,
             "stats": {"new_orders": new_orders, "cdek_orders": cdek_orders},
             "orders": orders,
@@ -671,6 +730,7 @@ def _render_landing_page(
                     --matte-white: #f7f7f5;
                     --matte-muted: #b7c0ba;
                     --matte-border: rgba(247, 247, 245, 0.12);
+                    --neon-green: #39ff88;
                 }}
                 body {{
                     margin: 0;
@@ -764,14 +824,26 @@ def _render_landing_page(
                     position: absolute;
                     inset: -2px;
                     border-radius: 20px;
-                    border: 1px solid rgba(1, 50, 32, 0.8);
-                    box-shadow: 0 0 24px rgba(1, 50, 32, 0.35);
-                    animation: blink 0.45s ease-in-out 2;
+                    border: 1px solid rgba(57, 255, 136, 0.45);
+                    box-shadow: 0 0 18px rgba(57, 255, 136, 0.35);
+                    animation: blink 0.35s ease-in-out 2;
                 }}
                 .value {{
                     font-size: clamp(36px, 6vw, 52px);
                     font-weight: 700;
                     color: var(--matte-white);
+                    text-shadow: 0 0 12px rgba(57, 255, 136, 0.15);
+                    position: relative;
+                }}
+                .value::after {{
+                    content: "";
+                    display: block;
+                    width: 40px;
+                    height: 2px;
+                    margin-top: 8px;
+                    background: rgba(57, 255, 136, 0.4);
+                    box-shadow: 0 0 8px rgba(57, 255, 136, 0.35);
+                    border-radius: 999px;
                 }}
                 .label {{
                     font-size: 14px;
@@ -806,7 +878,7 @@ def _render_landing_page(
                     border-radius: 999px;
                     cursor: pointer;
                     font-size: 13px;
-                    transition: background-color 0.15s ease, border-color 0.15s ease;
+                    transition: border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
                 }}
                 .filter-button:focus,
                 .filter-button:active {{
@@ -815,13 +887,13 @@ def _render_landing_page(
                     box-shadow: none;
                 }}
                 .filter-button:focus-visible {{
-                    outline: 1px solid rgba(1, 50, 32, 0.6);
+                    outline: 1px solid rgba(57, 255, 136, 0.4);
                     outline-offset: 1px;
                 }}
                 .filter-button.active {{
-                    border-color: rgba(1, 50, 32, 0.8);
-                    background: rgba(1, 50, 32, 0.8);
-                    box-shadow: none;
+                    border-color: rgba(57, 255, 136, 0.6);
+                    color: var(--neon-green);
+                    box-shadow: 0 0 12px rgba(57, 255, 136, 0.18);
                 }}
                 .reset-button {{
                     border: 1px solid rgba(1, 50, 32, 0.4);
@@ -840,19 +912,23 @@ def _render_landing_page(
                 .order-card {{
                     border: 1px solid var(--matte-border);
                     border-radius: 18px;
-                    padding: 18px 20px;
+                    padding: 20px 22px 22px;
                     background: rgba(11, 16, 13, 0.9);
                     display: grid;
-                    gap: 12px;
+                    gap: 16px;
                     cursor: pointer;
                     transition: border 0.2s ease, box-shadow 0.2s ease;
                 }}
                 .order-card:hover {{
-                    border-color: rgba(1, 50, 32, 0.6);
-                    box-shadow: 0 16px 26px rgba(0, 0, 0, 0.35);
+                    border-color: rgba(57, 255, 136, 0.35);
+                    box-shadow: 0 16px 26px rgba(0, 0, 0, 0.32);
+                }}
+                .order-card.new-order {{
+                    border-color: rgba(57, 255, 136, 0.4);
+                    box-shadow: 0 0 14px rgba(57, 255, 136, 0.18);
                 }}
                 .order-card.new-flash {{
-                    animation: glow 0.5s ease-in-out 1;
+                    animation: glow 0.4s ease-in-out 1;
                 }}
                 .order-header {{
                     display: flex;
@@ -864,6 +940,18 @@ def _render_landing_page(
                 .order-number {{
                     font-size: 18px;
                     font-weight: 600;
+                }}
+                .order-primary {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 6px;
+                }}
+                .order-meta-primary {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                    gap: 10px 16px;
+                    font-size: 13px;
+                    color: var(--matte-muted);
                 }}
                 .status-badge {{
                     padding: 4px 10px;
@@ -896,12 +984,29 @@ def _render_landing_page(
                 .order-meta {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                    gap: 8px 16px;
+                    gap: 10px 16px;
                     font-size: 13px;
                     color: var(--matte-muted);
                 }}
-                .order-meta span {{
-                    display: block;
+                .meta-item {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
+                }}
+                .meta-label {{
+                    font-size: 11px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.08em;
+                    color: rgba(247, 247, 245, 0.55);
+                }}
+                .meta-value {{
+                    font-size: 13px;
+                    color: var(--matte-white);
+                }}
+                .order-notes {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                    gap: 12px 18px;
                 }}
                 .order-actions {{
                     display: flex;
@@ -969,9 +1074,9 @@ def _render_landing_page(
                     color: #f1e3b1;
                 }}
                 @keyframes glow {{
-                    0% {{ box-shadow: 0 0 0 rgba(1, 50, 32, 0.0); }}
-                    50% {{ box-shadow: 0 0 24px rgba(1, 50, 32, 0.35); }}
-                    100% {{ box-shadow: 0 0 0 rgba(1, 50, 32, 0.0); }}
+                    0% {{ box-shadow: 0 0 0 rgba(57, 255, 136, 0.0); }}
+                    50% {{ box-shadow: 0 0 18px rgba(57, 255, 136, 0.35); }}
+                    100% {{ box-shadow: 0 0 0 rgba(57, 255, 136, 0.0); }}
                 }}
                 @keyframes blink {{
                     0%, 100% {{ opacity: 1; }}
@@ -1060,16 +1165,7 @@ def _render_landing_page(
 
                 const formatDate = (value) => {{
                     if (!value) return 'не указана';
-                    const parsed = new Date(value);
-                    if (Number.isNaN(parsed.getTime())) return value;
-                    return parsed.toLocaleString('ru-RU');
-                }};
-
-                const formatMoney = (value) => {{
-                    if (value === null || value === undefined) return 'не указана';
-                    const normalized = Number(value) / 100;
-                    if (Number.isNaN(normalized)) return 'не указана';
-                    return `${{normalized.toFixed(2)}} руб.`;
+                    return value;
                 }};
 
                 const getStatusClass = (state) => {{
@@ -1093,18 +1189,16 @@ def _render_landing_page(
                 }};
 
                 const filterByPeriod = (orders) => {{
-                    const now = new Date();
                     return orders.filter((order) => {{
-                        if (!order.moment) return false;
-                        const orderDate = new Date(order.moment);
+                        if (!order.moment_ms) return false;
+                        const orderTime = order.moment_ms;
+                        const nowTime = currentPayload.server_msk_now_ms;
+                        const todayStart = currentPayload.server_msk_today_start_ms;
                         if (activeFilters.period === 'today') {{
-                            return (
-                                orderDate.getDate() === now.getDate() &&
-                                orderDate.getMonth() === now.getMonth() &&
-                                orderDate.getFullYear() === now.getFullYear()
-                            );
+                            return todayStart ? orderTime >= todayStart : true;
                         }}
-                        const diffDays = (now - orderDate) / (1000 * 60 * 60 * 24);
+                        if (!nowTime) return true;
+                        const diffDays = (nowTime - orderTime) / (1000 * 60 * 60 * 24);
                         if (activeFilters.period === 'three_days') {{
                             return diffDays <= 3;
                         }}
@@ -1131,20 +1225,56 @@ def _render_landing_page(
                     ordersList.innerHTML = orders.map((order) => {{
                         const statusClass = getStatusClass(order.state);
                         const isHighlighted = highlightedIds.has(order.id);
+                        const isNew = isNewOrder(order.state);
                         return `
-                            <div class="order-card ${{isHighlighted ? 'new-flash' : ''}}" data-link="${{order.link || '#'}}">
+                            <div class="order-card ${{isNew ? 'new-order' : ''}} ${{isHighlighted ? 'new-flash' : ''}}" data-link="${{order.link || '#'}}">
                                 <div class="order-header">
-                                    <div class="order-number">${{order.name || 'без номера'}}</div>
+                                    <div class="order-primary">
+                                        <div class="order-number">${{order.name || 'без номера'}}</div>
+                                        <div class="order-meta-primary">
+                                            <div class="meta-item">
+                                                <span class="meta-label">Дата</span>
+                                                <span class="meta-value">${{formatDate(order.moment)}}</span>
+                                            </div>
+                                            <div class="meta-item">
+                                                <span class="meta-label">Город</span>
+                                                <span class="meta-value">${{order.city || 'не указан'}}</span>
+                                            </div>
+                                            <div class="meta-item">
+                                                <span class="meta-label">Доставка</span>
+                                                <span class="meta-value">${{order.delivery_method || 'не указан'}}</span>
+                                            </div>
+                                            <div class="meta-item">
+                                                <span class="meta-label">Сумма</span>
+                                                <span class="meta-value">${{order.sum_display || 'не указана'}}</span>
+                                            </div>
+                                        </div>
+                                    </div>
                                     <span class="status-badge ${{statusClass}}">${{order.state || 'не указан'}}</span>
                                 </div>
                                 <div class="order-meta">
-                                    <span>Дата: ${{formatDate(order.moment)}}</span>
-                                    <span>Город: ${{order.city || 'не указан'}}</span>
-                                    <span>Получатель: ${{order.recipient || 'не указан'}}</span>
-                                    <span>Телефон: ${{order.phone || 'не указан'}}</span>
-                                    <span>Email: ${{order.email || 'не указан'}}</span>
-                                    <span>Адрес: ${{order.address || 'не указан'}}</span>
-                                    <span>Сумма: ${{formatMoney(order.sum)}}</span>
+                                    <div class="meta-item">
+                                        <span class="meta-label">Получатель</span>
+                                        <span class="meta-value">${{order.recipient || 'не указан'}}</span>
+                                    </div>
+                                    <div class="meta-item">
+                                        <span class="meta-label">Телефон</span>
+                                        <span class="meta-value">${{order.phone || 'не указан'}}</span>
+                                    </div>
+                                    <div class="meta-item">
+                                        <span class="meta-label">Email</span>
+                                        <span class="meta-value">${{order.email || 'не указан'}}</span>
+                                    </div>
+                                </div>
+                                <div class="order-notes">
+                                    <div class="meta-item">
+                                        <span class="meta-label">Адрес</span>
+                                        <span class="meta-value">${{order.address || 'не указан'}}</span>
+                                    </div>
+                                    <div class="meta-item">
+                                        <span class="meta-label">Комментарий</span>
+                                        <span class="meta-value">${{order.comment || 'не указан'}}</span>
+                                    </div>
                                 </div>
                                 <div class="order-actions">
                                     <a class="order-link" href="${{order.link || '#'}}" target="_blank" rel="noreferrer">Открыть в МойСклад</a>
@@ -1167,8 +1297,8 @@ def _render_landing_page(
                 const applyFilters = (orders, highlightedIds) => {{
                     const filtered = filterByStatus(filterByPeriod(orders));
                     const sorted = filtered.sort((a, b) => {{
-                        const aTime = a.moment ? new Date(a.moment).getTime() : 0;
-                        const bTime = b.moment ? new Date(b.moment).getTime() : 0;
+                        const aTime = a.moment_ms || 0;
+                        const bTime = b.moment_ms || 0;
                         return bTime - aTime;
                     }});
                     renderOrders(sorted, highlightedIds);
@@ -1178,8 +1308,8 @@ def _render_landing_page(
                     const newCount = payload.stats?.new_orders ?? 0;
                     newOrdersCount.textContent = newCount;
                     cdekOrdersCount.textContent = payload.stats?.cdek_orders ?? 0;
-                    if (payload.updated_at) {{
-                        updatedAt.textContent = formatDate(payload.updated_at);
+                    if (payload.updated_at_display) {{
+                        updatedAt.textContent = payload.updated_at_display;
                     }}
                     statusText.textContent = payload.stale ? 'Данные устарели' : 'Данные обновлены';
                     statusText.classList.toggle('stale', Boolean(payload.stale));
@@ -1258,8 +1388,8 @@ def _render_landing_page(
                     try {{
                         const response = await fetch('/refresh', {{ method: 'POST' }});
                         const payload = await response.json();
-                        if (payload.updated_at) {{
-                            updatedAt.textContent = payload.updated_at.replace('T', ' ').split('.')[0];
+                        if (payload.updated_at_display) {{
+                            updatedAt.textContent = payload.updated_at_display;
                         }}
                         statusText.textContent = 'Данные обновлены';
                     }} catch (error) {{
@@ -1383,7 +1513,7 @@ def landing() -> HTMLResponse:
             }
             orders = sorted(
                 cache.get("orders", []),
-                key=lambda order: order.get("moment") or "",
+                key=lambda order: order.get("moment_ms") or 0,
                 reverse=True,
             )
     except Exception as exc:  # noqa: BLE001
@@ -1405,7 +1535,13 @@ async def refresh() -> JSONResponse:
     cache = await refresh_cache("manual")
     if not cache:
         cache = await anyio.to_thread.run_sync(read_cache)
-    return JSONResponse({"status": "ok", "updated_at": cache.get("updated_at") if cache else None})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "updated_at": cache.get("updated_at") if cache else None,
+            "updated_at_display": cache.get("updated_at_display") if cache else None,
+        }
+    )
 
 
 @app.get("/events")
