@@ -150,11 +150,8 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
 
     since = msk_now().subtract(days=max_days)
-    filters = [f"moment>={since.format('YYYY-MM-DD HH:mm:ss')}"]
+    filter_since = f"moment>={since.format('YYYY-MM-DD HH:mm:ss')}"
     store_href = store_href_from_env()
-    if store_href:
-        filters.append(f"store={store_href}")
-    filter_since = ";".join(filters)
 
     orders: List[Dict[str, Any]] = []
     offset = 0
@@ -165,13 +162,15 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
             params={
                 "limit": limit,
                 "offset": offset,
-                "expand": "state",
+                "expand": "state,store",
                 "filter": filter_since,
             },
             timeout=10,
         )
         response.raise_for_status()
         rows = response.json().get("rows", [])
+        if store_href:
+            rows = [order for order in rows if order_matches_store(order, store_href)]
         orders.extend(rows)
         if len(rows) < limit:
             break
