@@ -83,12 +83,29 @@ def fetch_order_positions(href: str) -> List[Dict[str, Any]]:
     return response.json().get("rows", [])
 
 
+def fetch_assortment_name(href: str) -> Optional[str]:
+    headers = _moysklad_headers()
+    if not headers:
+        raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+
+    response = requests.get(href, headers=headers, timeout=10)
+    response.raise_for_status()
+    return response.json().get("name")
+
+
 def _format_positions(positions: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for position in positions:
         assortment = position.get("assortment", {})
-        name = assortment.get("name") or "Товар"
+        name = assortment.get("name")
+        if not name:
+            assortment_href = assortment.get("meta", {}).get("href")
+            if assortment_href:
+                name = fetch_assortment_name(assortment_href)
+        name = name or "Товар"
         quantity = position.get("quantity") or 0
+        if isinstance(quantity, float) and quantity.is_integer():
+            quantity = int(quantity)
         price = _format_money(position.get("price"))
         lines.append(f"{name} - {quantity} шт. - {price} руб.")
     if not lines:
@@ -103,9 +120,13 @@ def build_message(order: Dict[str, Any]) -> str:
     name = order.get("name") or "без номера"
     sum_value = _format_money(order.get("sum"))
     description = order.get("description") or "нет"
-    href = order.get("meta", {}).get("href") or "нет"
-    site = order.get("source", {}).get("name") or _get_attribute_value(order, "сайт") or "не указан"
-    order_id = order.get("name") or order.get("id") or "не указан"
+    order_id = order.get("id") or "не указан"
+    order_link = (
+        f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
+        if order_id != "не указан"
+        else order.get("meta", {}).get("href")
+    ) or "нет"
+    site = state
     recipient = (
         order.get("shipmentAddressFull", {}).get("recipient")
         or _get_attribute_value(order, "получатель")
@@ -124,11 +145,21 @@ def build_message(order: Dict[str, Any]) -> str:
         or "не указан"
     )
     telegram = _get_attribute_value(order, "telegram") or _get_attribute_value(order, "телеграм") or "не указан"
-    delivery_method = (
-        _get_attribute_value(order, "способ доставки")
-        or order.get("shipmentAddressFull", {}).get("comment")
-        or "не указан"
-    )
+    delivery_service = order.get("shipmentAddressFull", {}).get("deliveryService")
+    shipment_method = order.get("shipmentAddressFull", {}).get("shipmentMethod")
+    delivery_method = _get_attribute_value(order, "способ доставки")
+    if not delivery_method:
+        if isinstance(delivery_service, dict):
+            delivery_method = delivery_service.get("name")
+        elif delivery_service:
+            delivery_method = str(delivery_service)
+    if not delivery_method:
+        if isinstance(shipment_method, dict):
+            delivery_method = shipment_method.get("name")
+        elif shipment_method:
+            delivery_method = str(shipment_method)
+    if not delivery_method:
+        delivery_method = "не указан"
     address = (
         order.get("shipmentAddress")
         or order.get("shipmentAddressFull", {}).get("address")
@@ -147,7 +178,7 @@ def build_message(order: Dict[str, Any]) -> str:
 
     return (
         f"📦 Заказ с \"{site}\" ({state})\n"
-        f"ID заказа: {order_id}\n\n"
+        f"ID заказа: {name}\n\n"
         f"👤 Получатель: {recipient}\n"
         f"📞 Номер телефона: {phone}\n"
         f"📧 Email: {email}\n"
@@ -163,7 +194,7 @@ def build_message(order: Dict[str, Any]) -> str:
         f"Сумма заказа: {sum_value} руб.\n\n"
         f"Комментарий: {description}\n"
         f"Создан: {moment}\n"
-        f"Ссылка: {href}"
+        f"Ссылка: {order_link}"
     )
 
 
