@@ -201,6 +201,10 @@ def _is_state_updated(event: Dict[str, Any]) -> bool:
     return False
 
 
+def _is_cdek_state(state_name: str) -> bool:
+    return "сдек" in state_name.casefold()
+
+
 def build_message(order: Dict[str, Any]) -> str:
     agent_details = _get_agent_details(order)
     agent = agent_details["agent"]
@@ -355,7 +359,7 @@ async def moysklad_webhook(request: Request) -> Dict[str, Any]:
             state_name = _get_state_name(order)
             if state_name == "МСК ПРОДАЖА":
                 continue
-            if state_name.casefold() == "сдек":
+            if _is_cdek_state(state_name):
                 message = build_cdek_message(order)
             else:
                 message = build_message(order)
