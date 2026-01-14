@@ -183,125 +183,106 @@ def _format_attribute_money(value: Optional[Any]) -> str:
     return str(value)
 
 
-def _get_delivery_method(order: Dict[str, Any]) -> str:
-    delivery_service = order.get("shipmentAddressFull", {}).get("deliveryService")
-    shipment_method = order.get("shipmentAddressFull", {}).get("shipmentMethod")
-    delivery_method = _get_attribute_value(order, "способ доставки")
-    if not delivery_method:
-        if isinstance(delivery_service, dict):
-            delivery_method = delivery_service.get("name")
-        elif delivery_service:
-            delivery_method = str(delivery_service)
-    if not delivery_method:
-        if isinstance(shipment_method, dict):
-            delivery_method = shipment_method.get("name")
-        elif shipment_method:
-            delivery_method = str(shipment_method)
-    return delivery_method or "не указан"
+def _first_non_empty(*values: Optional[Any]) -> Optional[str]:
+    for value in values:
+        normalized = _normalize_text(value)
+        if normalized:
+            return normalized
+    return None
 
 
-def _get_order_comment(order: Dict[str, Any]) -> str:
-    return (
-        order.get("description")
-        or order.get("shipmentAddressFull", {}).get("comment")
-        or _get_attribute_value(order, "комментарий")
-        or "нет"
-    )
+def _extract_delivery_method(value: Optional[Any]) -> Optional[str]:
+    if isinstance(value, dict):
+        name = value.get("name")
+        return _normalize_text(name)
+    return _normalize_text(value)
 
 
-def _get_order_address(order: Dict[str, Any]) -> str:
-    shipment_full = order.get("shipmentAddressFull")
-    address = _compose_shipment_address(shipment_full)
-    if not address:
-        address = _normalize_text(order.get("shipmentAddress"))
-    if not address:
-        address = _normalize_text(
-            _get_attribute_first(
-                order,
-                "адрес",
-                "адрес доставки",
-                "адрес получателя",
-                "адрес доставки получателя",
-                "address",
-            )
-        )
-    return address or "не указан"
-
-
-def _get_order_city(order: Dict[str, Any], address: Optional[str]) -> str:
-    shipment_full = order.get("shipmentAddressFull")
-    if address == "не указан":
-        address = None
-    city = None
-    if isinstance(shipment_full, dict):
-        city = _normalize_text(
-            shipment_full.get("city")
-            or shipment_full.get("settlement")
-            or shipment_full.get("region")
-        )
-    if not city and address:
-        city = _extract_city_from_address(address)
-    if not city:
-        city = _normalize_text(
-            _get_attribute_first(
-                order,
-                "город",
-                "город доставки",
-                "населенный пункт",
-                "city",
-            )
-        )
-    return city or "не указан"
-
-
-def _extract_order_fields(order: Dict[str, Any]) -> Dict[str, Any]:
+def extract_order_full_data(order: Dict[str, Any]) -> Dict[str, Any]:
     agent_details = _get_agent_details(order)
-    agent = agent_details["agent"]
-    agent_phone = agent_details["agent_phone"]
-    agent_email = agent_details["agent_email"]
     shipment_full = order.get("shipmentAddressFull")
+    shipment_full_data = shipment_full if isinstance(shipment_full, dict) else {}
 
-    recipient = (
-        _normalize_text(shipment_full.get("recipient")) if isinstance(shipment_full, dict) else None
-    )
-    if not recipient:
-        recipient = _normalize_text(_get_attribute_value(order, "получатель"))
-    recipient = recipient or agent or "не указан"
+    recipient = _first_non_empty(
+        shipment_full_data.get("recipient"),
+        _get_attribute_value(order, "получатель"),
+        order.get("recipient"),
+        agent_details.get("agent"),
+    ) or "не указан"
 
-    phone = _normalize_text(order.get("phone")) or _normalize_text(agent_phone)
-    if not phone:
-        phone = _normalize_text(_get_attribute_value(order, "телефон"))
-    phone = phone or "не указан"
+    phone = _first_non_empty(
+        shipment_full_data.get("phone"),
+        _get_attribute_value(order, "телефон"),
+        order.get("phone"),
+        agent_details.get("agent_phone"),
+    ) or "не указан"
 
-    email = _normalize_text(order.get("email")) or _normalize_text(agent_email)
-    if not email:
-        email = _normalize_text(_get_attribute_value(order, "email"))
-    email = email or "не указан"
+    email = _first_non_empty(
+        shipment_full_data.get("email"),
+        _get_attribute_value(order, "email"),
+        order.get("email"),
+        agent_details.get("agent_email"),
+    ) or "не указан"
 
-    address = _get_order_address(order)
-    city = _get_order_city(order, address)
-    delivery_method = _get_delivery_method(order)
-    comment = _get_order_comment(order)
-    moment_raw = order.get("moment")
-    moment_display = _format_datetime(moment_raw)
-    sum_display = f"{_format_money(order.get('sum'))} руб."
+    address = _first_non_empty(
+        _compose_shipment_address(shipment_full_data),
+        _get_attribute_first(
+            order,
+            "адрес",
+            "адрес доставки",
+            "адрес получателя",
+            "адрес доставки получателя",
+            "address",
+        ),
+        order.get("shipmentAddress"),
+        order.get("address"),
+    ) or "не указан"
+
+    city = _first_non_empty(
+        shipment_full_data.get("city"),
+        shipment_full_data.get("settlement"),
+        shipment_full_data.get("region"),
+        _extract_city_from_address(_normalize_text(shipment_full_data.get("address"))),
+        _get_attribute_first(
+            order,
+            "город",
+            "город доставки",
+            "населенный пункт",
+            "city",
+        ),
+        _extract_city_from_address(_normalize_text(order.get("shipmentAddress"))),
+    ) or "не указан"
+
+    delivery_method = _first_non_empty(
+        _extract_delivery_method(shipment_full_data.get("deliveryService")),
+        _extract_delivery_method(shipment_full_data.get("shipmentMethod")),
+        _get_attribute_value(order, "способ доставки"),
+        order.get("deliveryMethod"),
+        order.get("shipmentMethod"),
+    ) or "не указан"
+
+    comment = _first_non_empty(
+        shipment_full_data.get("comment"),
+        shipment_full_data.get("addInfo"),
+        _get_attribute_value(order, "комментарий"),
+        order.get("description"),
+    ) or "не указан"
+
+    moment_display = _format_datetime(order.get("moment"))
 
     return {
         "state": _get_state_name(order),
-        "moment_raw": moment_raw,
-        "moment_display": moment_display,
-        "moment_ms": _msk_millis(moment_raw),
         "name": order.get("name") or "без номера",
         "sum": order.get("sum"),
-        "sum_display": sum_display,
-        "comment": comment,
         "recipient": recipient,
         "phone": phone,
         "email": email,
         "delivery_method": delivery_method,
-        "address": address,
         "city": city,
-        "order_link": _order_link(order),
+        "address": address,
+        "comment": comment,
+        "moment": moment_display,
+        "link": _order_link(order),
     }
 
 
@@ -431,13 +412,13 @@ def is_new_order(state: str) -> bool:
 
 
 def build_message(order: Dict[str, Any]) -> str:
-    fields = _extract_order_fields(order)
+    fields = extract_order_full_data(order)
     state = fields["state"]
-    moment = fields["moment_display"]
+    moment = fields["moment"]
     name = fields["name"]
-    sum_value = _format_money(order.get("sum"))
+    sum_value = _format_money(fields["sum"])
     description = fields["comment"]
-    order_link = fields["order_link"]
+    order_link = fields["link"]
     recipient = fields["recipient"]
     phone = fields["phone"]
     email = fields["email"]
@@ -472,10 +453,10 @@ def build_message(order: Dict[str, Any]) -> str:
 
 
 def build_cdek_message(order: Dict[str, Any]) -> str:
-    fields = _extract_order_fields(order)
+    fields = extract_order_full_data(order)
     state = fields["state"]
     name = fields["name"]
-    order_link = fields["order_link"]
+    order_link = fields["link"]
     recipient = fields["recipient"]
     phone = fields["phone"]
     address = fields["address"]
@@ -510,15 +491,15 @@ def send_telegram_message(text: str) -> None:
 
 
 def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
-    fields = _extract_order_fields(order)
+    fields = extract_order_full_data(order)
     return {
         "id": order.get("id") or "",
         "name": fields["name"],
         "state": fields["state"],
-        "moment": fields["moment_display"],
-        "moment_ms": fields["moment_ms"],
+        "moment": fields["moment"],
+        "moment_ms": _msk_millis(order.get("moment")),
         "sum": fields["sum"],
-        "sum_display": fields["sum_display"],
+        "sum_display": f"{_format_money(fields['sum'])} руб.",
         "city": fields["city"],
         "recipient": fields["recipient"],
         "phone": fields["phone"],
@@ -526,7 +507,7 @@ def _serialize_order(order: Dict[str, Any]) -> Dict[str, Any]:
         "delivery_method": fields["delivery_method"],
         "address": fields["address"],
         "comment": fields["comment"],
-        "link": fields["order_link"],
+        "link": fields["link"],
     }
 
 
@@ -738,6 +719,11 @@ def _render_landing_page(
                         radial-gradient(circle at top, rgba(1, 50, 32, 0.35) 0%, rgba(1, 50, 32, 0.08) 45%, transparent 70%),
                         linear-gradient(135deg, #0b120f 0%, #050806 45%, #010202 100%);
                     color: var(--matte-white);
+                    background-attachment: fixed;
+                }}
+                body,
+                .glitter {{
+                    will-change: opacity;
                 }}
                 .container {{
                     max-width: 1200px;
@@ -819,14 +805,9 @@ def _render_landing_page(
                 .card:hover {{
                     border-color: rgba(1, 50, 32, 0.6);
                 }}
-                .card.kpi-alert::after {{
-                    content: "";
-                    position: absolute;
-                    inset: -2px;
-                    border-radius: 20px;
-                    border: 1px solid rgba(57, 255, 136, 0.45);
+                .card.kpi-alert {{
                     box-shadow: 0 0 18px rgba(57, 255, 136, 0.35);
-                    animation: blink 0.35s ease-in-out 2;
+                    animation: blink 0.175s ease-in-out 1;
                 }}
                 .value {{
                     font-size: clamp(36px, 6vw, 52px);
@@ -878,26 +859,24 @@ def _render_landing_page(
                     border-radius: 999px;
                     cursor: pointer;
                     font-size: 13px;
-                    transition: border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
                 }}
+                .filter-button,
+                .filter-button:hover,
+                .filter-button:active,
                 .filter-button:focus,
-                .filter-button:active {{
+                .filter-button:focus-visible,
+                .filter-button.active,
+                .reset-button,
+                .reset-button:hover,
+                .reset-button:active,
+                .reset-button:focus,
+                .reset-button:focus-visible {{
                     background: var(--matte-surface-strong);
-                    outline: none;
                     box-shadow: none;
-                }}
-                .filter-button:focus-visible {{
-                    outline: 1px solid rgba(57, 255, 136, 0.4);
-                    outline-offset: 1px;
-                }}
-                .filter-button.active {{
-                    border-color: rgba(57, 255, 136, 0.6);
-                    color: var(--neon-green);
-                    box-shadow: 0 0 12px rgba(57, 255, 136, 0.18);
+                    outline: none;
                 }}
                 .reset-button {{
                     border: 1px solid rgba(1, 50, 32, 0.4);
-                    background: transparent;
                     color: var(--matte-muted);
                     padding: 8px 16px;
                     border-radius: 999px;
@@ -907,7 +886,7 @@ def _render_landing_page(
                 .orders {{
                     margin-top: 28px;
                     display: grid;
-                    gap: 16px;
+                    gap: 22px;
                 }}
                 .order-card {{
                     border: 1px solid var(--matte-border);
@@ -928,7 +907,7 @@ def _render_landing_page(
                     box-shadow: 0 0 14px rgba(57, 255, 136, 0.18);
                 }}
                 .order-card.new-flash {{
-                    animation: glow 0.4s ease-in-out 1;
+                    box-shadow: 0 0 22px rgba(57, 255, 136, 0.25);
                 }}
                 .order-header {{
                     display: flex;
@@ -949,7 +928,7 @@ def _render_landing_page(
                 .order-meta-primary {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-                    gap: 10px 16px;
+                    gap: 14px 18px;
                     font-size: 13px;
                     color: var(--matte-muted);
                 }}
@@ -984,7 +963,7 @@ def _render_landing_page(
                 .order-meta {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                    gap: 10px 16px;
+                    gap: 14px 18px;
                     font-size: 13px;
                     color: var(--matte-muted);
                 }}
@@ -1006,7 +985,7 @@ def _render_landing_page(
                 .order-notes {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-                    gap: 12px 18px;
+                    gap: 16px 20px;
                 }}
                 .order-actions {{
                     display: flex;
@@ -1039,7 +1018,7 @@ def _render_landing_page(
                         radial-gradient(circle at 80% 60%, rgba(247, 247, 245, 0.05) 0, transparent 2px);
                     opacity: 0.16;
                     mix-blend-mode: screen;
-                    animation: glitter 6s ease-in-out infinite;
+                    animation: glitter 3s ease-in-out infinite;
                 }}
                 .glitter::after {{
                     content: "";
@@ -1049,7 +1028,7 @@ def _render_landing_page(
                         radial-gradient(circle at 10% 50%, rgba(247, 247, 245, 0.06) 0, transparent 2px),
                         radial-gradient(circle at 90% 40%, rgba(247, 247, 245, 0.06) 0, transparent 2px);
                     opacity: 0.3;
-                    animation: glitter 8s ease-in-out infinite reverse;
+                    animation: glitter 4s ease-in-out infinite reverse;
                 }}
                 .empty-state {{
                     padding: 24px;
@@ -1072,11 +1051,6 @@ def _render_landing_page(
                 }}
                 .stale {{
                     color: #f1e3b1;
-                }}
-                @keyframes glow {{
-                    0% {{ box-shadow: 0 0 0 rgba(57, 255, 136, 0.0); }}
-                    50% {{ box-shadow: 0 0 18px rgba(57, 255, 136, 0.35); }}
-                    100% {{ box-shadow: 0 0 0 rgba(57, 255, 136, 0.0); }}
                 }}
                 @keyframes blink {{
                     0%, 100% {{ opacity: 1; }}
@@ -1292,6 +1266,14 @@ def _render_landing_page(
                             }}
                         }});
                     }});
+
+                    if (highlightedIds.size) {{
+                        setTimeout(() => {{
+                            document.querySelectorAll('.order-card.new-flash').forEach((card) => {{
+                                card.classList.remove('new-flash');
+                            }});
+                        }}, 450);
+                    }}
                 }};
 
                 const applyFilters = (orders, highlightedIds) => {{
@@ -1316,7 +1298,7 @@ def _render_landing_page(
 
                     if (newCount > previousNewCount) {{
                         kpiNewOrders.classList.add('kpi-alert');
-                        setTimeout(() => kpiNewOrders.classList.remove('kpi-alert'), 900);
+                        setTimeout(() => kpiNewOrders.classList.remove('kpi-alert'), 450);
                     }}
                 }};
 
