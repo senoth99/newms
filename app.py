@@ -138,12 +138,21 @@ def _order_link(order: Dict[str, Any]) -> str:
 
 def _is_state_updated(event: Dict[str, Any]) -> bool:
     updated_fields = event.get("updatedFields")
+    def _field_contains_state(field_name: str) -> bool:
+        return "state" in field_name.casefold()
+
     if isinstance(updated_fields, str):
-        return updated_fields == "state"
+        return _field_contains_state(updated_fields)
     if isinstance(updated_fields, list):
-        return "state" in updated_fields
+        return any(
+            isinstance(field, str) and _field_contains_state(field)
+            for field in updated_fields
+        )
     if isinstance(updated_fields, dict):
-        return "state" in updated_fields
+        return any(
+            isinstance(field, str) and _field_contains_state(field)
+            for field in updated_fields.keys()
+        )
     return False
 
 
