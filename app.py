@@ -23,9 +23,11 @@ MSK_TZ = pendulum.timezone("Europe/Moscow")
 EMPTY_VALUE = "—"
 
 CACHE_LOCK = threading.Lock()
+ENTITY_CACHE_LOCK = threading.Lock()
 UPDATE_LOCK = asyncio.Lock()
 SUBSCRIBERS_LOCK = asyncio.Lock()
 SUBSCRIBERS: List[asyncio.Queue[str]] = []
+ENTITY_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
 
 logger = logging.getLogger("moysklad")
 logging.basicConfig(level=logging.INFO)
@@ -40,8 +42,8 @@ class OrderDTO(BaseModel):
     sum: int
     sum_display: str
     recipient: str
-    phone: str
-    email: str
+    phone: Optional[str]
+    email: Optional[str]
     delivery_method: str
     city: str
     address: str
@@ -155,14 +157,45 @@ def order_matches_store(order: Dict[str, Any], store_href: Optional[str]) -> boo
     return True
 
 
-def fetch_entity(href: str) -> Dict[str, Any]:
+def fetch_entity(href: str) -> Optional[Dict[str, Any]]:
+    if not href:
+        return None
+    with ENTITY_CACHE_LOCK:
+        if href in ENTITY_CACHE:
+            return ENTITY_CACHE[href]
     headers = moysklad_headers()
     if not headers:
-        raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+        logger.error("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+        with ENTITY_CACHE_LOCK:
+            ENTITY_CACHE[href] = None
+        return None
     logger.info("Fetching entity: %s", href)
-    response = requests.get(href, headers=headers, timeout=10)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(href, headers=headers, timeout=10)
+        if response.status_code in {401, 403}:
+            response.raise_for_status()
+        response.raise_for_status()
+    except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as exc:
+        logger.warning("Timeout fetching entity %s: %s", href, exc)
+        with ENTITY_CACHE_LOCK:
+            ENTITY_CACHE[href] = None
+        return None
+    except requests.exceptions.HTTPError as exc:
+        logger.error("HTTP error fetching entity %s: %s", href, exc)
+        if exc.response is not None and exc.response.status_code in {401, 403}:
+            raise
+        with ENTITY_CACHE_LOCK:
+            ENTITY_CACHE[href] = None
+        return None
+    except requests.exceptions.RequestException as exc:
+        logger.warning("Failed to fetch entity %s: %s", href, exc)
+        with ENTITY_CACHE_LOCK:
+            ENTITY_CACHE[href] = None
+        return None
+    data = response.json()
+    with ENTITY_CACHE_LOCK:
+        ENTITY_CACHE[href] = data
+    return data
 
 
 def fetch_order_positions(href: str) -> List[Dict[str, Any]]:
@@ -170,9 +203,21 @@ def fetch_order_positions(href: str) -> List[Dict[str, Any]]:
     if not headers:
         raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
     logger.info("Fetching order positions: %s", href)
-    response = requests.get(href, headers=headers, timeout=10)
-    response.raise_for_status()
-    return response.json().get("rows", [])
+    try:
+        response = requests.get(href, headers=headers, timeout=10)
+        if response.status_code in {401, 403}:
+            response.raise_for_status()
+        response.raise_for_status()
+        return response.json().get("rows", [])
+    except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as exc:
+        logger.warning("Timeout fetching positions %s: %s", href, exc)
+    except requests.exceptions.HTTPError as exc:
+        logger.error("HTTP error fetching positions %s: %s", href, exc)
+        if exc.response is not None and exc.response.status_code in {401, 403}:
+            raise
+    except requests.exceptions.RequestException as exc:
+        logger.warning("Failed to fetch positions %s: %s", href, exc)
+    return []
 
 
 def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str, Any]]:
@@ -193,19 +238,33 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
     orders: List[Dict[str, Any]] = []
     offset = 0
     while True:
-        response = requests.get(
-            "https://api.moysklad.ru/api/remap/1.2/entity/customerorder",
-            headers=headers,
-            params={
-                "limit": limit,
-                "offset": offset,
-                "expand": "state,store",
-                "filter": filter_since,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        rows = response.json().get("rows", [])
+        try:
+            response = requests.get(
+                "https://api.moysklad.ru/api/remap/1.2/entity/customerorder",
+                headers=headers,
+                params={
+                    "limit": limit,
+                    "offset": offset,
+                    "expand": "state,store",
+                    "filter": filter_since,
+                },
+                timeout=10,
+            )
+            if response.status_code in {401, 403}:
+                response.raise_for_status()
+            response.raise_for_status()
+            rows = response.json().get("rows", [])
+        except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as exc:
+            logger.warning("Timeout fetching orders (offset=%s): %s", offset, exc)
+            break
+        except requests.exceptions.HTTPError as exc:
+            logger.error("HTTP error fetching orders (offset=%s): %s", offset, exc)
+            if exc.response is not None and exc.response.status_code in {401, 403}:
+                raise
+            break
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Failed to fetch orders (offset=%s): %s", offset, exc)
+            break
         logger.info("Fetched %s orders (offset=%s)", len(rows), offset)
         if store_href:
             rows = [order for order in rows if order_matches_store(order, store_href)]
@@ -302,11 +361,13 @@ def get_state_name(order: Dict[str, Any]) -> str:
     if not state:
         state_href = state_info.get("meta", {}).get("href")
         if state_href:
-            state = fetch_entity(state_href).get("name")
+            state_data = fetch_entity(state_href)
+            if state_data:
+                state = state_data.get("name")
     return state or EMPTY_VALUE
 
 
-def get_agent_details(order: Dict[str, Any]) -> Dict[str, Optional[str]]:
+def get_agent_details(order: Dict[str, Any]) -> Optional[Dict[str, Optional[str]]]:
     agent_info = order.get("agent", {})
     agent = agent_info.get("name")
     agent_phone = agent_info.get("phone")
@@ -314,9 +375,12 @@ def get_agent_details(order: Dict[str, Any]) -> Dict[str, Optional[str]]:
     agent_href = agent_info.get("meta", {}).get("href")
     if agent_href and (not agent or not agent_phone or not agent_email):
         agent_details = fetch_entity(agent_href)
-        agent = agent or agent_details.get("name")
-        agent_phone = agent_phone or agent_details.get("phone")
-        agent_email = agent_email or agent_details.get("email")
+        if agent_details:
+            agent = agent or agent_details.get("name")
+            agent_phone = agent_phone or agent_details.get("phone")
+            agent_email = agent_email or agent_details.get("email")
+    if not agent and not agent_phone and not agent_email:
+        return None
     return {
         "agent": agent,
         "agent_phone": agent_phone,
@@ -337,26 +401,31 @@ def build_order_dto(order: Dict[str, Any]) -> OrderDTO:
     shipment_full_data = shipment_full if isinstance(shipment_full, dict) else {}
     delivery_address_attribute = normalize_text(attribute_value(order, "адрес доставки"))
 
-    recipient = first_non_empty(
-        shipment_full_data.get("recipient"),
-        attribute_value(order, "получатель"),
-        order.get("recipient"),
-        agent_details.get("agent"),
-    ) or EMPTY_VALUE
+    if agent_details is None:
+        recipient = "Неизвестно"
+        phone = None
+        email = None
+    else:
+        recipient = first_non_empty(
+            shipment_full_data.get("recipient"),
+            attribute_value(order, "получатель"),
+            order.get("recipient"),
+            agent_details.get("agent"),
+        ) or EMPTY_VALUE
 
-    phone = first_non_empty(
-        shipment_full_data.get("phone"),
-        attribute_value(order, "телефон"),
-        order.get("phone"),
-        agent_details.get("agent_phone"),
-    ) or EMPTY_VALUE
+        phone = first_non_empty(
+            shipment_full_data.get("phone"),
+            attribute_value(order, "телефон"),
+            order.get("phone"),
+            agent_details.get("agent_phone"),
+        )
 
-    email = first_non_empty(
-        shipment_full_data.get("email"),
-        attribute_value(order, "email"),
-        order.get("email"),
-        agent_details.get("agent_email"),
-    ) or EMPTY_VALUE
+        email = first_non_empty(
+            shipment_full_data.get("email"),
+            attribute_value(order, "email"),
+            order.get("email"),
+            agent_details.get("agent_email"),
+        )
 
     address = first_non_empty(
         compose_shipment_address(shipment_full_data),
@@ -449,7 +518,9 @@ def format_positions(positions: List[Dict[str, Any]]) -> str:
         if not name:
             assortment_href = assortment.get("meta", {}).get("href")
             if assortment_href:
-                name = fetch_entity(assortment_href).get("name")
+                assortment_data = fetch_entity(assortment_href)
+                if assortment_data:
+                    name = assortment_data.get("name")
         name = name or "Товар"
         quantity = position.get("quantity") or 0
         if isinstance(quantity, float) and quantity.is_integer():
@@ -463,6 +534,8 @@ def format_positions(positions: List[Dict[str, Any]]) -> str:
 
 def build_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
+    phone_display = dto.phone or EMPTY_VALUE
+    email_display = dto.email or EMPTY_VALUE
     delivery_link = attribute_value(order, "ссылка на доставку") or EMPTY_VALUE
     track_number = attribute_value(order, "трек-номер") or EMPTY_VALUE
 
@@ -476,8 +549,8 @@ def build_message(order: Dict[str, Any]) -> str:
         f"📦 {dto.state}\n"
         f"ID заказа: {dto.name}\n\n"
         f"👤 Получатель: {dto.recipient}\n"
-        f"📞 Номер телефона: {dto.phone}\n"
-        f"📧 Email: {dto.email}\n"
+        f"📞 Номер телефона: {phone_display}\n"
+        f"📧 Email: {email_display}\n"
         f"Способ доставки: {dto.delivery_method}\n\n"
         f"🏠 Адрес доставки: {dto.address}\n"
         f"Ссылка на доставку: {delivery_link}\n"
@@ -493,6 +566,7 @@ def build_message(order: Dict[str, Any]) -> str:
 
 def build_cdek_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
+    phone_display = dto.phone or EMPTY_VALUE
     delivery_link = attribute_value(order, "ссылка на доставку") or EMPTY_VALUE
     track_number = attribute_value(order, "трек-номер") or EMPTY_VALUE
 
@@ -500,7 +574,7 @@ def build_cdek_message(order: Dict[str, Any]) -> str:
         f"🚚 {dto.state}\n"
         f"ID заказа: {dto.name}\n\n"
         f"👤 Получатель: {dto.recipient}\n"
-        f"📞 Номер телефона: {dto.phone}\n"
+        f"📞 Номер телефона: {phone_display}\n"
         f"🏠 Адрес доставки: {dto.address}\n"
         f"Ссылка на доставку: {delivery_link}\n"
         f"Трек-номер: {track_number}\n"
@@ -624,7 +698,15 @@ def update_cache_with_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_cache_from_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
-    serialized_orders = [serialize_order(build_order_dto(order)) for order in orders]
+    serialized_orders: List[Dict[str, Any]] = []
+    for order in orders:
+        try:
+            serialized_orders.append(serialize_order(build_order_dto(order)))
+        except requests.exceptions.HTTPError as exc:
+            logger.error("Critical error serializing order %s: %s", order.get("id"), exc)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to serialize order %s: %s", order.get("id"), exc)
     serialized_orders = dedupe_orders(serialized_orders)
     return cache_payload(serialized_orders)
 
@@ -1640,6 +1722,9 @@ async def process_webhook_event(href: str) -> None:
         order = await anyio.to_thread.run_sync(fetch_entity, href)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch order details: %s", exc)
+        return
+    if not order:
+        logger.warning("Order data missing for webhook href: %s", href)
         return
     store_href = store_href_from_env()
     if store_href and not order_matches_store(order, store_href):
