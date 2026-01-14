@@ -127,6 +127,45 @@ def _format_positions(positions: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _resolve_state(order: Dict[str, Any]) -> str:
+    state_info = order.get("state", {})
+    state = state_info.get("name")
+    if not state:
+        state_href = state_info.get("meta", {}).get("href")
+        if state_href:
+            state = fetch_entity(state_href).get("name")
+    return state or "не указан"
+
+
+def _order_link(order: Dict[str, Any]) -> str:
+    order_id = order.get("id")
+    return (
+        f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
+        if order_id
+        else order.get("meta", {}).get("href")
+    ) or "нет"
+
+
+def _is_state_updated(event: Dict[str, Any]) -> bool:
+    updated_fields = event.get("updatedFields")
+    def _field_contains_state(field_name: str) -> bool:
+        return "state" in field_name.casefold()
+
+    if isinstance(updated_fields, str):
+        return _field_contains_state(updated_fields)
+    if isinstance(updated_fields, list):
+        return any(
+            isinstance(field, str) and _field_contains_state(field)
+            for field in updated_fields
+        )
+    if isinstance(updated_fields, dict):
+        return any(
+            isinstance(field, str) and _field_contains_state(field)
+            for field in updated_fields.keys()
+        )
+    return False
+
+
 def build_message(order: Dict[str, Any]) -> str:
     agent_info = order.get("agent", {})
     agent = agent_info.get("name")
@@ -217,6 +256,30 @@ def build_message(order: Dict[str, Any]) -> str:
         f"Сумма заказа: {sum_value} руб.\n\n"
         f"Комментарий: {description}\n"
         f"Создан: {moment}\n"
+        f"Ссылка: {order_link}"
+    )
+
+
+def build_sdek_message(order: Dict[str, Any], event: Dict[str, Any]) -> str:
+    address = (
+        order.get("shipmentAddress")
+        or order.get("shipmentAddressFull", {}).get("address")
+        or "не указан"
+    )
+    delivery_link = _get_attribute_value(order, "ссылка на доставку") or "не указана"
+    track_number = _get_attribute_value(order, "трек-номер") or "не указан"
+    order_id = order.get("id") or order.get("name") or "не указан"
+    assembled_at = _format_datetime(
+        event.get("moment") or order.get("updated") or order.get("moment")
+    )
+    order_link = _order_link(order)
+    return (
+        "🚚 ПЕРЕДАН В СДЕК\n"
+        f"ID заказа: {order_id}\n\n"
+        f"🏠 Адрес доставки: {address}\n"
+        f"Ссылка на доставку: {delivery_link}\n"
+        f"Трек-номер: {track_number}\n\n"
+        f"Собран: {assembled_at}\n"
         f"Ссылка: {order_link}"
     )
 
