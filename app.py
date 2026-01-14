@@ -4,9 +4,14 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 
 app = FastAPI(title="MoySklad Telegram Notifier")
+
+
+EXCLUDED_NEW_ORDER_STATES = {"Собран СДЕК", "МСК ПРОДАЖА", "Возврат", "Обмен"}
+CDEK_ORDER_STATE = "Собран СДЕК"
 
 
 def _get_env(name: str) -> str:
@@ -140,6 +145,29 @@ def fetch_entity(href: str) -> Dict[str, Any]:
 
 def fetch_assortment_name(href: str) -> Optional[str]:
     return fetch_entity(href).get("name")
+
+
+def fetch_customer_orders(limit: int = 100) -> List[Dict[str, Any]]:
+    headers = _moysklad_headers()
+    if not headers:
+        raise RuntimeError("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
+
+    orders: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        response = requests.get(
+            "https://api.moysklad.ru/api/remap/1.2/entity/customerorder",
+            headers=headers,
+            params={"limit": limit, "offset": offset, "expand": "state"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        rows = response.json().get("rows", [])
+        orders.extend(rows)
+        if len(rows) < limit:
+            break
+        offset += limit
+    return orders
 
 
 def _format_positions(positions: List[Dict[str, Any]]) -> str:
@@ -333,9 +361,132 @@ def send_telegram_message(text: str) -> None:
     response.raise_for_status()
 
 
+def _count_orders_by_state(orders: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {"new_orders": 0, "cdek_orders": 0}
+    for order in orders:
+        state_name = _get_state_name(order)
+        if state_name == CDEK_ORDER_STATE:
+            counts["cdek_orders"] += 1
+        if state_name not in EXCLUDED_NEW_ORDER_STATES:
+            counts["new_orders"] += 1
+    return counts
+
+
+def _render_landing_page(new_orders: int, cdek_orders: int, error: Optional[str]) -> str:
+    error_block = ""
+    if error:
+        error_block = f"""
+        <div class="error">
+            Не удалось получить данные: {error}
+        </div>
+        """
+    return f"""
+    <!doctype html>
+    <html lang="ru">
+        <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>Статистика заказов</title>
+            <style>
+                :root {{
+                    color-scheme: light;
+                    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+                }}
+                body {{
+                    margin: 0;
+                    background: #f5f6fb;
+                    color: #1f2937;
+                }}
+                .container {{
+                    max-width: 960px;
+                    margin: 0 auto;
+                    padding: 48px 24px 64px;
+                }}
+                h1 {{
+                    font-size: 32px;
+                    margin-bottom: 12px;
+                }}
+                .subtitle {{
+                    color: #6b7280;
+                    margin-bottom: 32px;
+                }}
+                .grid {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                    gap: 24px;
+                }}
+                .card {{
+                    background: #ffffff;
+                    border-radius: 16px;
+                    padding: 28px;
+                    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
+                }}
+                .value {{
+                    font-size: 48px;
+                    font-weight: 700;
+                }}
+                .label {{
+                    font-size: 14px;
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
+                    color: #6b7280;
+                }}
+                .error {{
+                    margin-top: 24px;
+                    padding: 16px 20px;
+                    border-radius: 12px;
+                    background: #fee2e2;
+                    color: #991b1b;
+                    font-size: 14px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Лендинг статистики заказов</h1>
+                <div class="subtitle">
+                    Здесь отображаются новые заказы и заказы, собранные в СДЭК.
+                </div>
+                <div class="grid">
+                    <div class="card">
+                        <div class="value">{new_orders}</div>
+                        <div class="label">НОВЫЕ ЗАКАЗЫ</div>
+                    </div>
+                    <div class="card">
+                        <div class="value">{cdek_orders}</div>
+                        <div class="label">ОТПРАВЛЕНО СДЕК</div>
+                    </div>
+                </div>
+                {error_block}
+            </div>
+        </body>
+    </html>
+    """
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+def landing() -> HTMLResponse:
+    error: Optional[str] = None
+    try:
+        orders = fetch_customer_orders()
+        counts = _count_orders_by_state(orders)
+    except (requests.RequestException, RuntimeError) as exc:
+        error = str(exc)
+        counts = {"new_orders": 0, "cdek_orders": 0}
+    html = _render_landing_page(
+        new_orders=counts["new_orders"],
+        cdek_orders=counts["cdek_orders"],
+        error=error,
+    )
+    return HTMLResponse(content=html)
 
 
 @app.post("/webhook/moysklad")
