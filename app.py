@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 app = FastAPI(title="MoySklad Telegram Notifier")
 
 
-CACHE_PATH = "/data/orders_cache.json"
+CACHE_PATH = "/tmp/orders_cache.json"
 CACHE_TTL_SECONDS = 300
 
 CACHE_LOCK = threading.Lock()
@@ -27,13 +27,6 @@ SUBSCRIBERS: List[asyncio.Queue[str]] = []
 
 logger = logging.getLogger("moysklad")
 logging.basicConfig(level=logging.INFO)
-
-
-def _get_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
 
 
 def _now_iso() -> str:
@@ -352,8 +345,11 @@ def build_cdek_message(order: Dict[str, Any]) -> str:
 
 
 def send_telegram_message(text: str) -> None:
-    bot_token = _get_env("TG_BOT_TOKEN")
-    chat_id = _get_env("TG_CHAT_ID")
+    bot_token = os.getenv("TG_BOT_TOKEN")
+    chat_id = os.getenv("TG_CHAT_ID")
+    if not bot_token or not chat_id:
+        logger.warning("Telegram env vars missing, skipping send")
+        return
 
     response = requests.post(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -977,9 +973,9 @@ def landing() -> HTMLResponse:
 @app.post("/refresh")
 async def refresh() -> JSONResponse:
     cache = await refresh_cache("manual")
-    if cache:
-        return JSONResponse({"status": "ok", "updated_at": cache.get("updated_at")})
-    return JSONResponse({"status": "error", "updated_at": None})
+    if not cache:
+        cache = await anyio.to_thread.run_sync(read_cache)
+    return JSONResponse({"status": "ok", "updated_at": cache.get("updated_at") if cache else None})
 
 
 @app.get("/events")
