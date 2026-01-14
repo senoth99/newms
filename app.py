@@ -395,7 +395,13 @@ def _cache_payload(orders: List[Dict[str, Any]], updated_at: Optional[str] = Non
 
 
 def _ensure_cache_dir() -> None:
-    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+    cache_dir = os.path.dirname(CACHE_PATH)
+    if not cache_dir:
+        return
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to ensure cache directory %s: %s", cache_dir, exc)
 
 
 def _load_cache_unlocked() -> Optional[Dict[str, Any]]:
@@ -913,6 +919,7 @@ async def _process_webhook_event(href: str) -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    _ensure_cache_dir()
     asyncio.create_task(auto_refresh_loop())
 
 
