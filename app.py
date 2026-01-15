@@ -477,6 +477,10 @@ def is_cdek_state(state: str) -> bool:
     return "сдек" in state.casefold()
 
 
+def is_cdek_delivery(method: str) -> bool:
+    return "сдек" in method.casefold()
+
+
 def is_new_order(state: str) -> bool:
     if not state or state == EMPTY_VALUE:
         return True
@@ -602,9 +606,10 @@ def weekly_sales_stats(orders: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, 
         if moment_ms and moment_ms < week_start_ms:
             continue
         state = str(order.get("state") or "")
+        delivery_method = str(order.get("delivery_method") or "")
         sum_value = order.get("sum")
         sum_amount = int(sum_value) if isinstance(sum_value, (int, float)) else 0
-        if is_cdek_state(state):
+        if is_cdek_delivery(delivery_method):
             stats["cdek_orders"]["count"] += 1
             stats["cdek_orders"]["sum"] += sum_amount
         elif is_new_order(state):
@@ -618,7 +623,8 @@ def stats_from_orders(orders: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     for order in orders:
         stats["total_orders"] += 1
         state = str(order.get("state") or "")
-        if is_cdek_state(state):
+        delivery_method = str(order.get("delivery_method") or "")
+        if is_cdek_delivery(delivery_method):
             stats["cdek_orders"] += 1
         elif is_new_order(state):
             stats["new_orders"] += 1
@@ -912,51 +918,8 @@ LANDING_TEMPLATE = """
             .kpi-row {
                 margin-top: 24px;
                 display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
                 gap: 18px;
-            }
-            .weekly-row {
-                margin-top: 18px;
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-                gap: 18px;
-            }
-            .weekly-card {
-                background: var(--matte-surface);
-                border-radius: 18px;
-                padding: 20px 24px;
-                border: 1px solid var(--matte-border);
-                display: grid;
-                gap: 12px;
-            }
-            .weekly-title {
-                font-size: 12px;
-                letter-spacing: 0.2em;
-                text-transform: uppercase;
-                color: var(--matte-muted);
-            }
-            .weekly-metrics {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-                gap: 12px;
-            }
-            .weekly-metric {
-                background: rgba(7, 12, 9, 0.7);
-                border-radius: 14px;
-                padding: 12px 14px;
-                border: 1px solid rgba(247, 247, 245, 0.08);
-            }
-            .weekly-label {
-                font-size: 11px;
-                color: var(--matte-muted);
-                text-transform: uppercase;
-                letter-spacing: 0.12em;
-            }
-            .weekly-value {
-                margin-top: 6px;
-                font-size: 20px;
-                font-weight: 600;
-                color: var(--matte-white);
             }
             .kpi-card {
                 background: var(--matte-surface);
@@ -981,6 +944,16 @@ LANDING_TEMPLATE = """
                 letter-spacing: 0.24em;
                 text-transform: uppercase;
                 color: var(--matte-muted);
+            }
+            .kpi-breakdown {
+                display: grid;
+                gap: 6px;
+                font-size: 13px;
+                color: var(--silver);
+            }
+            .kpi-breakdown span {
+                color: var(--matte-white);
+                font-weight: 600;
             }
             .filters {
                 margin-top: 28px;
@@ -1217,6 +1190,7 @@ LANDING_TEMPLATE = """
                 font-size: 12px;
                 letter-spacing: 0.04em;
                 border: 1px solid rgba(76, 255, 178, 0.2);
+                box-shadow: 0 0 16px rgba(76, 255, 178, 0.25);
                 pointer-events: none;
                 opacity: 0;
                 transform: translateY(6px);
@@ -1225,6 +1199,12 @@ LANDING_TEMPLATE = """
             .tooltip.visible {
                 opacity: 1;
                 transform: translateY(0);
+            }
+            .tooltip div {
+                line-height: 1.4;
+            }
+            .tooltip strong {
+                color: var(--neon-green);
             }
             .empty-state {
                 padding: 24px 20px;
@@ -1272,41 +1252,12 @@ LANDING_TEMPLATE = """
             </section>
 
             <div class="kpi-row">
-                <div class="kpi-card" id="kpi-new-orders">
-                    <div class="kpi-value" id="new-orders-count">__NEW_ORDERS__</div>
-                    <div class="kpi-label">Новые заказы</div>
-                </div>
-                <div class="kpi-card" id="kpi-cdek-orders">
-                    <div class="kpi-value" id="cdek-orders-count">__CDEK_ORDERS__</div>
-                    <div class="kpi-label">Отправлено СДЭК</div>
-                </div>
-            </div>
-
-            <div class="weekly-row">
-                <div class="weekly-card">
-                    <div class="weekly-title">Новые заказы • 7 дней</div>
-                    <div class="weekly-metrics">
-                        <div class="weekly-metric">
-                            <div class="weekly-label">Кол-во продаж</div>
-                            <div class="weekly-value" id="weekly-new-count">0</div>
-                        </div>
-                        <div class="weekly-metric">
-                            <div class="weekly-label">Сумма продаж</div>
-                            <div class="weekly-value" id="weekly-new-sum">0</div>
-                        </div>
-                    </div>
-                </div>
-                <div class="weekly-card">
-                    <div class="weekly-title">Собран СДЭК • 7 дней</div>
-                    <div class="weekly-metrics">
-                        <div class="weekly-metric">
-                            <div class="weekly-label">Кол-во продаж</div>
-                            <div class="weekly-value" id="weekly-cdek-count">0</div>
-                        </div>
-                        <div class="weekly-metric">
-                            <div class="weekly-label">Сумма продаж</div>
-                            <div class="weekly-value" id="weekly-cdek-sum">0</div>
-                        </div>
+                <div class="kpi-card" id="kpi-main">
+                    <div class="kpi-value" id="main-kpi-value">0 заказов • 0 ₽</div>
+                    <div class="kpi-label">Всего заказов • общая сумма</div>
+                    <div class="kpi-breakdown">
+                        <div>Из них: <span id="breakdown-new">0 новые заказы</span></div>
+                        <div>Доставка: <span id="breakdown-cdek">0 СДЭК</span></div>
                     </div>
                 </div>
             </div>
@@ -1379,21 +1330,17 @@ LANDING_TEMPLATE = """
             const refreshButton = document.getElementById('refresh-button');
             const statusText = document.getElementById('status-text');
             const updatedAt = document.getElementById('updated-at');
-            const newOrdersCount = document.getElementById('new-orders-count');
-            const cdekOrdersCount = document.getElementById('cdek-orders-count');
             const ordersList = document.getElementById('orders-list');
             const resetFilters = document.getElementById('reset-filters');
             const periodButtons = document.querySelectorAll('[data-period]');
             const statusButtons = document.querySelectorAll('[data-status]');
-            const kpiNewOrders = document.getElementById('kpi-new-orders');
-            const kpiCdekOrders = document.getElementById('kpi-cdek-orders');
+            const mainKpiValue = document.getElementById('main-kpi-value');
+            const breakdownNew = document.getElementById('breakdown-new');
+            const breakdownCdek = document.getElementById('breakdown-cdek');
+            const kpiMain = document.getElementById('kpi-main');
             const tooltip = document.getElementById('tooltip');
             const chartMeta = document.getElementById('chart-meta');
             const chartEmpty = document.getElementById('chart-empty');
-            const weeklyNewCount = document.getElementById('weekly-new-count');
-            const weeklyNewSum = document.getElementById('weekly-new-sum');
-            const weeklyCdekCount = document.getElementById('weekly-cdek-count');
-            const weeklyCdekSum = document.getElementById('weekly-cdek-sum');
 
             let lenis = null;
             if (window.Lenis) {
@@ -1435,6 +1382,11 @@ LANDING_TEMPLATE = """
                 ) && !value.includes('сдек');
             };
 
+            const isCdekDelivery = (deliveryMethod) => {
+                const value = (deliveryMethod || '').toLowerCase();
+                return value.includes('сдек');
+            };
+
             const getMskTodayStartMs = () => {
                 return currentPayload?.server_msk_today_start_ms || 0;
             };
@@ -1449,6 +1401,17 @@ LANDING_TEMPLATE = """
                     return new Set(days.slice(-3).map((day) => day.key));
                 }
                 return new Set(days.map((day) => day.key));
+            };
+
+            const getDaysForPeriod = () => {
+                const days = currentPayload?.days || [];
+                if (activeFilters.period === 'today') {
+                    return days.slice(-1);
+                }
+                if (activeFilters.period === 'three_days') {
+                    return days.slice(-3);
+                }
+                return days;
             };
 
             const filterByPeriod = (orders) => {
@@ -1476,7 +1439,7 @@ LANDING_TEMPLATE = """
             const filterByStatus = (orders) => {
                 if (activeFilters.status === 'all') return orders;
                 if (activeFilters.status === 'cdek') {
-                    return orders.filter((order) => (order.state || '').toLowerCase().includes('сдек'));
+                    return orders.filter((order) => isCdekDelivery(order.delivery_method));
                 }
                 if (activeFilters.status === 'new') {
                     return orders.filter((order) => isNewOrder(order.state));
@@ -1484,10 +1447,13 @@ LANDING_TEMPLATE = """
                 return orders;
             };
 
-            const applyFilters = () => {
+            const getFilteredOrders = () => {
                 const orders = currentPayload.orders || [];
-                const filtered = filterByStatus(filterByPeriod(orders));
-                filteredOrders = filtered.sort((a, b) => (b.moment_ms || 0) - (a.moment_ms || 0));
+                return filterByStatus(filterByPeriod(orders));
+            };
+
+            const applyFilters = (orders) => {
+                filteredOrders = orders.sort((a, b) => (b.moment_ms || 0) - (a.moment_ms || 0));
                 renderIndex = 0;
                 if (!filteredOrders.length) {
                     ordersList.innerHTML = '<div class="empty-state">Нет заказов</div>';
@@ -1516,6 +1482,14 @@ LANDING_TEMPLATE = """
                     maximumFractionDigits: 2,
                 }).format(number / 100);
                 return `${formatted} руб.`;
+            };
+
+            const formatRub = (value) => {
+                const number = Number(value) || 0;
+                const formatted = new Intl.NumberFormat('ru-RU', {
+                    maximumFractionDigits: 0,
+                }).format(number / 100);
+                return `${formatted} ₽`;
             };
 
             const renderOrderRow = (order, highlightedIds) => {
@@ -1676,6 +1650,27 @@ LANDING_TEMPLATE = """
                 });
             };
 
+            const showTooltipAtHtml = (x, y, html) => {
+                if (!html) return;
+                if (!window.FloatingUIDOM) {
+                    console.warn('[Dashboard] FloatingUI not loaded');
+                    return;
+                }
+                tooltip.innerHTML = html;
+                tooltip.classList.add('visible');
+                const virtualEl = {
+                    getBoundingClientRect() {
+                        return { x, y, top: y, left: x, right: x, bottom: y, width: 0, height: 0 };
+                    },
+                };
+                window.FloatingUIDOM.computePosition(virtualEl, tooltip, {
+                    placement: 'top',
+                    middleware: [window.FloatingUIDOM.offset(8), window.FloatingUIDOM.shift({ padding: 8 })],
+                }).then(({ x: nextX, y: nextY }) => {
+                    Object.assign(tooltip.style, { left: `${nextX}px`, top: `${nextY}px` });
+                });
+            };
+
             const hideTooltip = () => {
                 tooltip.classList.remove('visible');
             };
@@ -1719,25 +1714,50 @@ LANDING_TEMPLATE = """
                 return Array.from(seriesMap.values());
             };
 
-            const updateChart = (payload) => {
-                const orders = payload.orders || [];
-                const days = payload.days || [];
+            const updateChart = (orders) => {
+                const days = getDaysForPeriod();
                 const series = buildSeriesFromOrders(orders, days);
                 const labels = series.map((item) => item.label);
                 const counts = series.map((item) => item.count);
                 const sums = series.map((item) => item.sum);
-                const totalCount = counts.reduce((acc, value) => acc + value, 0);
-                const totalSum = sums.reduce((acc, value) => acc + value, 0);
+                const totalCount = orders.length;
+                const totalSum = orders.reduce((acc, order) => acc + (Number(order.sum) || 0), 0);
+                const seriesCount = counts.reduce((acc, value) => acc + value, 0);
+                const seriesSum = sums.reduce((acc, value) => acc + value, 0);
                 const maxValue = Math.max(...counts, 0);
+
+                if (seriesCount !== totalCount || seriesSum !== totalSum) {
+                    console.error('[Dashboard] Chart totals mismatch', {
+                        totalCount,
+                        totalSum,
+                        seriesCount,
+                        seriesSum,
+                    });
+                    if (salesChart) {
+                        salesChart.destroy();
+                        salesChart = null;
+                    }
+                    if (chartMeta) {
+                        chartMeta.textContent = 'Ошибка данных';
+                    }
+                    if (chartEmpty) {
+                        chartEmpty.textContent = 'Ошибка данных для диаграммы';
+                        chartEmpty.classList.add('visible');
+                    }
+                    return;
+                }
+
                 if (chartMeta) {
                     chartMeta.textContent =
                         totalCount > 0
-                            ? `Всего ${totalCount} заказов • ${formatMoney(totalSum)}`
+                            ? `Всего ${totalCount} заказов • ${formatRub(totalSum)}`
                             : 'Нет данных';
                 }
                 if (chartEmpty) {
+                    chartEmpty.textContent = 'Нет данных для диаграммы';
                     chartEmpty.classList.toggle('visible', totalCount === 0);
                 }
+
                 if (!salesChart) {
                     const ctx = document.getElementById('sales-chart').getContext('2d');
                     salesChart = new Chart(ctx, {
@@ -1751,6 +1771,9 @@ LANDING_TEMPLATE = """
                                 borderRadius: 8,
                                 borderSkipped: false,
                                 hoverBackgroundColor: 'rgba(76, 255, 178, 0.8)',
+                                borderColor: 'rgba(76, 255, 178, 0.25)',
+                                hoverBorderColor: 'rgba(76, 255, 178, 0.9)',
+                                hoverBorderWidth: 2,
                                 minBarLength: 6,
                             }],
                         },
@@ -1777,7 +1800,10 @@ LANDING_TEMPLATE = """
                                 mode: 'index',
                                 intersect: true,
                             },
-                            animation: false,
+                            animation: {
+                                duration: 650,
+                                easing: 'easeOutQuart',
+                            },
                         },
                     });
                     salesChart.canvas.addEventListener('mousemove', (event) => {
@@ -1789,10 +1815,11 @@ LANDING_TEMPLATE = """
                         const point = points[0];
                         const count = series[point.index]?.count || 0;
                         const sum = series[point.index]?.sum || 0;
-                        showTooltipAt(
+                        const label = labels[point.index] || '';
+                        showTooltipAtHtml(
                             event.clientX,
                             event.clientY,
-                            `${labels[point.index]} • ${count} заказов • ${formatMoney(sum)}`
+                            `<div>${label}</div><div>Заказов: <strong>${count}</strong></div><div>Сумма: <strong>${formatRub(sum)}</strong></div>`
                         );
                     });
                     salesChart.canvas.addEventListener('mouseleave', hideTooltip);
@@ -1804,41 +1831,25 @@ LANDING_TEMPLATE = """
                 }
             };
 
-            const updateKpi = (payload) => {
-                const newCount = payload.stats?.new_orders ?? 0;
-                const cdekCount = payload.stats?.cdek_orders ?? 0;
-                const weeklyNew = payload.stats?.weekly_sales?.new_orders || {};
-                const weeklyCdek = payload.stats?.weekly_sales?.cdek_orders || {};
-                const prevNew = Number(newOrdersCount.textContent || 0);
-                const prevCdek = Number(cdekOrdersCount.textContent || 0);
-                newOrdersCount.textContent = newCount;
-                cdekOrdersCount.textContent = cdekCount;
-                if (weeklyNewCount) {
-                    weeklyNewCount.textContent = weeklyNew.count ?? 0;
-                }
-                if (weeklyNewSum) {
-                    weeklyNewSum.textContent = formatMoney(weeklyNew.sum ?? 0);
-                }
-                if (weeklyCdekCount) {
-                    weeklyCdekCount.textContent = weeklyCdek.count ?? 0;
-                }
-                if (weeklyCdekSum) {
-                    weeklyCdekSum.textContent = formatMoney(weeklyCdek.sum ?? 0);
-                }
+            const updateKpi = (orders, payload) => {
+                const totalCount = orders.length;
+                const totalSum = orders.reduce((acc, order) => acc + (Number(order.sum) || 0), 0);
+                const newCount = orders.filter((order) => isNewOrder(order.state)).length;
+                const cdekCount = orders.filter((order) => isCdekDelivery(order.delivery_method)).length;
+                const prevTotal = Number((mainKpiValue.textContent || '0').split(' ')[0]) || 0;
+                mainKpiValue.textContent = `${totalCount} заказов • ${formatRub(totalSum)}`;
+                breakdownNew.textContent = `${newCount} новые заказы`;
+                breakdownCdek.textContent = `${cdekCount} СДЭК`;
                 updatedAt.textContent = payload.updated_at || '';
                 statusText.textContent = payload.stale ? 'Данные устарели' : 'Данные обновлены';
-                if (newCount > prevNew) {
-                    kpiNewOrders.classList.add('neon');
-                    setTimeout(() => kpiNewOrders.classList.remove('neon'), 500);
-                }
-                if (cdekCount > prevCdek) {
-                    kpiCdekOrders.classList.add('neon');
-                    setTimeout(() => kpiCdekOrders.classList.remove('neon'), 500);
+                if (totalCount > prevTotal) {
+                    kpiMain.classList.add('neon');
+                    setTimeout(() => kpiMain.classList.remove('neon'), 500);
                 }
             };
 
             const updateFromPayload = (payload) => {
-                if (!payload || !payload.stats) return;
+                if (!payload) return;
                 const orders = payload.orders || [];
                 const newIds = new Set(orders.map((order) => order.id));
                 const highlightedIds = [];
@@ -1850,9 +1861,10 @@ LANDING_TEMPLATE = """
                 payload.highlighted_ids = highlightedIds;
                 knownOrderIds = newIds;
                 currentPayload = payload;
-                updateKpi(payload);
-                updateChart(payload);
-                applyFilters();
+                const baseOrders = getFilteredOrders();
+                updateKpi(baseOrders, payload);
+                updateChart(baseOrders);
+                applyFilters(baseOrders);
                 console.info('[Dashboard] Payload updated', {
                     updated_at: payload.updated_at,
                     total: payload.stats?.total_orders,
@@ -1872,7 +1884,10 @@ LANDING_TEMPLATE = """
                 button.addEventListener('click', () => {
                     activeFilters.period = button.getAttribute('data-period');
                     setActiveButton(periodButtons, activeFilters.period, 'data-period');
-                    applyFilters();
+                    const baseOrders = getFilteredOrders();
+                    updateKpi(baseOrders, currentPayload);
+                    updateChart(baseOrders);
+                    applyFilters(baseOrders);
                 });
             });
 
@@ -1880,7 +1895,10 @@ LANDING_TEMPLATE = """
                 button.addEventListener('click', () => {
                     activeFilters.status = button.getAttribute('data-status');
                     setActiveButton(statusButtons, activeFilters.status, 'data-status');
-                    applyFilters();
+                    const baseOrders = getFilteredOrders();
+                    updateKpi(baseOrders, currentPayload);
+                    updateChart(baseOrders);
+                    applyFilters(baseOrders);
                 });
             });
 
@@ -1888,20 +1906,12 @@ LANDING_TEMPLATE = """
                 activeFilters = { period: 'week', status: 'all' };
                 setActiveButton(periodButtons, activeFilters.period, 'data-period');
                 setActiveButton(statusButtons, activeFilters.status, 'data-status');
-                applyFilters();
+                const baseOrders = getFilteredOrders();
+                updateKpi(baseOrders, currentPayload);
+                updateChart(baseOrders);
+                applyFilters(baseOrders);
             });
 
-            kpiNewOrders.addEventListener('click', () => {
-                activeFilters.status = 'new';
-                setActiveButton(statusButtons, activeFilters.status, 'data-status');
-                applyFilters();
-            });
-
-            kpiCdekOrders.addEventListener('click', () => {
-                activeFilters.status = 'cdek';
-                setActiveButton(statusButtons, activeFilters.status, 'data-status');
-                applyFilters();
-            });
 
             refreshButton.addEventListener('click', async () => {
                 refreshButton.disabled = true;
@@ -2018,8 +2028,6 @@ def render_landing_page(cache: Optional[Dict[str, Any]]) -> str:
     return (
         LANDING_TEMPLATE.replace("__UPDATED_AT__", escape(updated_at))
         .replace("__STATUS_TEXT__", escape(status_text))
-        .replace("__NEW_ORDERS__", str(stats.get("new_orders", 0)))
-        .replace("__CDEK_ORDERS__", str(stats.get("cdek_orders", 0)))
         .replace("__WARNING_BLOCK__", warning_block)
         .replace("__EMPTY_BLOCK__", empty_block)
         .replace("__INITIAL_PAYLOAD__", initial_payload)
