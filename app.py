@@ -1193,7 +1193,7 @@ LANDING_TEMPLATE = """
         <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/@studio-freight/lenis@1.0.42/bundled/lenis.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/@floating-ui/dom@1.6.7"></script>
+        <script src="https://unpkg.com/@floating-ui/dom@1.6.7/dist/floating-ui.dom.umd.min.js"></script>
         <script>
             const initialPayload = __INITIAL_PAYLOAD__;
             let currentPayload = initialPayload;
@@ -1218,15 +1218,18 @@ LANDING_TEMPLATE = """
             const chartMeta = document.getElementById('chart-meta');
             const chartEmpty = document.getElementById('chart-empty');
 
-            const lenis = new Lenis({
-                lerp: 0.12,
-                smoothWheel: true,
-            });
-            function raf(time) {
-                lenis.raf(time);
+            let lenis = null;
+            if (window.Lenis) {
+                lenis = new Lenis({
+                    lerp: 0.12,
+                    smoothWheel: true,
+                });
+                function raf(time) {
+                    lenis.raf(time);
+                    requestAnimationFrame(raf);
+                }
                 requestAnimationFrame(raf);
             }
-            requestAnimationFrame(raf);
 
             const animateIntro = () => {
                 gsap.from('.hero-panel', { opacity: 0, y: 20, duration: 0.6, stagger: 0.12 });
@@ -1393,6 +1396,10 @@ LANDING_TEMPLATE = """
 
             const showTooltip = (target, text) => {
                 if (!text) return;
+                if (!window.FloatingUIDOM) {
+                    console.warn('[Dashboard] FloatingUI not loaded');
+                    return;
+                }
                 tooltip.textContent = text;
                 tooltip.classList.add('visible');
                 window.FloatingUIDOM.computePosition(target, tooltip, {
@@ -1405,6 +1412,10 @@ LANDING_TEMPLATE = """
 
             const showTooltipAt = (x, y, text) => {
                 if (!text) return;
+                if (!window.FloatingUIDOM) {
+                    console.warn('[Dashboard] FloatingUI not loaded');
+                    return;
+                }
                 tooltip.textContent = text;
                 tooltip.classList.add('visible');
                 const virtualEl = {
