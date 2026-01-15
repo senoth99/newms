@@ -284,6 +284,12 @@ def attribute_value(order: Dict[str, Any], attribute_name: str) -> Optional[Any]
     return None
 
 
+def as_dict(value: Optional[Any]) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 def attribute_first(order: Dict[str, Any], *attribute_names: str) -> Optional[Any]:
     for name in attribute_names:
         value = attribute_value(order, name)
@@ -346,7 +352,7 @@ def first_non_empty(*values: Optional[Any]) -> Optional[str]:
 
 
 def get_state_name(order: Dict[str, Any]) -> str:
-    state_info = order.get("state", {})
+    state_info = as_dict(order.get("state"))
     state = state_info.get("name")
     if not state:
         state_href = state_info.get("meta", {}).get("href")
@@ -358,7 +364,7 @@ def get_state_name(order: Dict[str, Any]) -> str:
 
 
 def get_agent_details(order: Dict[str, Any]) -> Optional[Dict[str, Optional[str]]]:
-    agent_info = order.get("agent", {})
+    agent_info = as_dict(order.get("agent"))
     agent = agent_info.get("name")
     agent_phone = agent_info.get("phone")
     agent_email = agent_info.get("email")
@@ -387,8 +393,7 @@ def order_link(order: Dict[str, Any]) -> str:
 
 def build_order_dto(order: Dict[str, Any]) -> OrderDTO:
     agent_details = get_agent_details(order)
-    shipment_full = order.get("shipmentAddressFull")
-    shipment_full_data = shipment_full if isinstance(shipment_full, dict) else {}
+    shipment_full_data = as_dict(order.get("shipmentAddressFull"))
     delivery_address_attribute = normalize_text(attribute_value(order, "адрес доставки"))
 
     if agent_details is None:
