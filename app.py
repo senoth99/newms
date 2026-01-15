@@ -167,8 +167,8 @@ def fetch_entity(href: str) -> Optional[Dict[str, Any]]:
     if not headers:
         logger.error("Missing MS_TOKEN or MS_BASIC_TOKEN for MoySklad API access")
         with ENTITY_CACHE_LOCK:
-            ENTITY_CACHE[href] = None
-        return None
+            ENTITY_CACHE[href] = {}
+        return {}
     logger.info("Fetching entity: %s", href)
     try:
         response = requests.get(href, headers=headers, timeout=10)
@@ -178,20 +178,18 @@ def fetch_entity(href: str) -> Optional[Dict[str, Any]]:
     except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as exc:
         logger.warning("Timeout fetching entity %s: %s", href, exc)
         with ENTITY_CACHE_LOCK:
-            ENTITY_CACHE[href] = None
-        return None
+            ENTITY_CACHE[href] = {}
+        return {}
     except requests.exceptions.HTTPError as exc:
         logger.error("HTTP error fetching entity %s: %s", href, exc)
-        if exc.response is not None and exc.response.status_code in {401, 403}:
-            raise
         with ENTITY_CACHE_LOCK:
-            ENTITY_CACHE[href] = None
-        return None
+            ENTITY_CACHE[href] = {}
+        return {}
     except requests.exceptions.RequestException as exc:
         logger.warning("Failed to fetch entity %s: %s", href, exc)
         with ENTITY_CACHE_LOCK:
-            ENTITY_CACHE[href] = None
-        return None
+            ENTITY_CACHE[href] = {}
+        return {}
     data = response.json()
     with ENTITY_CACHE_LOCK:
         ENTITY_CACHE[href] = data
@@ -205,16 +203,12 @@ def fetch_order_positions(href: str) -> List[Dict[str, Any]]:
     logger.info("Fetching order positions: %s", href)
     try:
         response = requests.get(href, headers=headers, timeout=10)
-        if response.status_code in {401, 403}:
-            response.raise_for_status()
         response.raise_for_status()
         return response.json().get("rows", [])
     except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as exc:
         logger.warning("Timeout fetching positions %s: %s", href, exc)
     except requests.exceptions.HTTPError as exc:
         logger.error("HTTP error fetching positions %s: %s", href, exc)
-        if exc.response is not None and exc.response.status_code in {401, 403}:
-            raise
     except requests.exceptions.RequestException as exc:
         logger.warning("Failed to fetch positions %s: %s", href, exc)
     return []
@@ -250,8 +244,6 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
                 },
                 timeout=10,
             )
-            if response.status_code in {401, 403}:
-                response.raise_for_status()
             response.raise_for_status()
             rows = response.json().get("rows", [])
         except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as exc:
@@ -259,8 +251,6 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
             break
         except requests.exceptions.HTTPError as exc:
             logger.error("HTTP error fetching orders (offset=%s): %s", offset, exc)
-            if exc.response is not None and exc.response.status_code in {401, 403}:
-                raise
             break
         except requests.exceptions.RequestException as exc:
             logger.warning("Failed to fetch orders (offset=%s): %s", offset, exc)
@@ -622,6 +612,13 @@ def cache_payload(orders: List[Dict[str, Any]], updated_at: Optional[str] = None
     }
 
 
+def cache_is_valid(cache: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(cache, dict):
+        return False
+    orders = cache.get("orders")
+    return isinstance(orders, list) and len(orders) > 0
+
+
 def ensure_cache_dir() -> None:
     cache_dir = os.path.dirname(CACHE_PATH)
     if not cache_dir:
@@ -656,7 +653,10 @@ def write_cache_unlocked(cache: Dict[str, Any]) -> None:
 
 def read_cache() -> Optional[Dict[str, Any]]:
     with CACHE_LOCK:
-        return load_cache_unlocked()
+        cache = load_cache_unlocked()
+    if cache_is_valid(cache):
+        return cache
+    return None
 
 
 def write_cache(cache: Dict[str, Any]) -> None:
@@ -702,9 +702,6 @@ def build_cache_from_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     for order in orders:
         try:
             serialized_orders.append(serialize_order(build_order_dto(order)))
-        except requests.exceptions.HTTPError as exc:
-            logger.error("Critical error serializing order %s: %s", order.get("id"), exc)
-            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to serialize order %s: %s", order.get("id"), exc)
     serialized_orders = dedupe_orders(serialized_orders)
@@ -736,9 +733,9 @@ def log_stats(cache: Dict[str, Any]) -> None:
     )
 
 
-def event_payload(cache: Dict[str, Any]) -> str:
+def event_payload_dict(cache: Dict[str, Any]) -> Dict[str, Any]:
     now = msk_now()
-    payload = {
+    return {
         "updated_at": cache.get("updated_at"),
         "server_msk_now_ms": int(now.int_timestamp * 1000),
         "server_msk_today_start_ms": int(msk_day_start(now).int_timestamp * 1000),
@@ -748,7 +745,10 @@ def event_payload(cache: Dict[str, Any]) -> str:
         "stale": cache_is_stale(cache),
         "days": msk_day_labels(),
     }
-    return orjson.dumps(payload).decode("utf-8")
+
+
+def event_payload(cache: Dict[str, Any]) -> str:
+    return orjson.dumps(event_payload_dict(cache)).decode("utf-8")
 
 
 def safe_json_for_html(payload: Dict[str, Any]) -> str:
@@ -970,10 +970,15 @@ LANDING_TEMPLATE = """
                 flex-direction: column;
             }
             .order-row {
-                padding: 14px 20px;
+                padding: 12px 20px;
                 border-bottom: 1px solid rgba(247, 247, 245, 0.06);
-                min-height: 84px;
+                min-height: 72px;
                 background: rgba(7, 12, 9, 0.88);
+                transition: background 0.2s ease, box-shadow 0.2s ease;
+            }
+            .order-row:hover {
+                background: rgba(10, 18, 14, 0.92);
+                box-shadow: inset 0 0 0 1px rgba(76, 255, 178, 0.12);
             }
             .order-row:last-child {
                 border-bottom: none;
@@ -1023,6 +1028,7 @@ LANDING_TEMPLATE = """
                 border-radius: 18px;
                 border: 1px solid var(--matte-border);
                 padding: 18px 22px 26px;
+                position: relative;
             }
             .chart-header {
                 display: flex;
@@ -1042,6 +1048,24 @@ LANDING_TEMPLATE = """
             }
             .chart-canvas {
                 height: 220px;
+            }
+            .chart-empty {
+                position: absolute;
+                inset: 56px 22px 26px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 13px;
+                color: var(--matte-muted);
+                background: rgba(7, 12, 9, 0.4);
+                border-radius: 14px;
+                border: 1px dashed rgba(247, 247, 245, 0.12);
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.2s ease;
+            }
+            .chart-empty.visible {
+                opacity: 1;
             }
             .warning {
                 margin-top: 20px;
@@ -1132,6 +1156,7 @@ LANDING_TEMPLATE = """
                 <div class="chart-canvas">
                     <canvas id="sales-chart"></canvas>
                 </div>
+                <div class="chart-empty" id="chart-empty">Нет данных для диаграммы</div>
             </div>
 
             <div class="filters">
@@ -1201,6 +1226,7 @@ LANDING_TEMPLATE = """
             const kpiCdekOrders = document.getElementById('kpi-cdek-orders');
             const tooltip = document.getElementById('tooltip');
             const chartMeta = document.getElementById('chart-meta');
+            const chartEmpty = document.getElementById('chart-empty');
 
             const lenis = new Lenis({
                 lerp: 0.12,
@@ -1435,11 +1461,14 @@ LANDING_TEMPLATE = """
                 const days = payload.days || [];
                 const series = buildSeriesFromOrders(orders, days);
                 const labels = series.map((item) => item.label);
-                const sums = series.map((item) => Math.max(item.sum / 100, 0));
-                const maxValue = Math.max(...sums, 0);
-                const counts = series.reduce((acc, item) => acc + item.count, 0);
+                const counts = series.map((item) => item.count);
+                const totalCount = counts.reduce((acc, value) => acc + value, 0);
+                const maxValue = Math.max(...counts, 0);
                 if (chartMeta) {
-                    chartMeta.textContent = `Всего ${counts} заказов`;
+                    chartMeta.textContent = totalCount > 0 ? `Всего ${totalCount} заказов` : 'Нет данных';
+                }
+                if (chartEmpty) {
+                    chartEmpty.classList.toggle('visible', totalCount === 0);
                 }
                 if (!salesChart) {
                     const ctx = document.getElementById('sales-chart').getContext('2d');
@@ -1448,8 +1477,8 @@ LANDING_TEMPLATE = """
                         data: {
                             labels,
                             datasets: [{
-                                label: 'Сумма',
-                                data: sums,
+                                label: 'Заказы',
+                                data: counts,
                                 backgroundColor: 'rgba(76, 255, 178, 0.45)',
                                 borderRadius: 8,
                                 borderSkipped: false,
@@ -1463,9 +1492,9 @@ LANDING_TEMPLATE = """
                             scales: {
                                 y: {
                                     beginAtZero: true,
-                                    suggestedMax: maxValue,
+                                    suggestedMax: maxValue || 1,
                                     grid: { color: 'rgba(247, 247, 245, 0.08)' },
-                                    ticks: { color: 'rgba(247, 247, 245, 0.5)' },
+                                    ticks: { color: 'rgba(247, 247, 245, 0.5)', precision: 0 },
                                 },
                                 x: {
                                     grid: { display: false },
@@ -1483,26 +1512,25 @@ LANDING_TEMPLATE = """
                             animation: false,
                         },
                     });
-                        salesChart.canvas.addEventListener('mousemove', (event) => {
-                            const points = salesChart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, true);
-                            if (!points.length) {
-                                hideTooltip();
-                                return;
-                            }
-                            const point = points[0];
-                            const value = sums[point.index];
-                            const count = series[point.index]?.count || 0;
-                            showTooltipAt(
-                                event.clientX,
-                                event.clientY,
-                                `${labels[point.index]} • ${value.toFixed(2)} руб. • ${count} заказов`
-                            );
-                        });
+                    salesChart.canvas.addEventListener('mousemove', (event) => {
+                        const points = salesChart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, true);
+                        if (!points.length) {
+                            hideTooltip();
+                            return;
+                        }
+                        const point = points[0];
+                        const count = series[point.index]?.count || 0;
+                        showTooltipAt(
+                            event.clientX,
+                            event.clientY,
+                            `${labels[point.index]} • ${count} заказов`
+                        );
+                    });
                     salesChart.canvas.addEventListener('mouseleave', hideTooltip);
                 } else {
                     salesChart.data.labels = labels;
-                    salesChart.data.datasets[0].data = sums;
-                    salesChart.options.scales.y.suggestedMax = maxValue;
+                    salesChart.data.datasets[0].data = counts;
+                    salesChart.options.scales.y.suggestedMax = maxValue || 1;
                     salesChart.update();
                 }
             };
@@ -1598,12 +1626,14 @@ LANDING_TEMPLATE = """
                 console.info('[Dashboard] Manual refresh triggered');
                 try {
                     const response = await fetch('/refresh', { method: 'POST' });
-                    const payload = await response.json();
-                    if (payload.updated_at) {
-                        updatedAt.textContent = payload.updated_at;
+                    const result = await response.json();
+                    if (result?.payload) {
+                        updateFromPayload(result.payload);
+                    } else if (result?.updated_at) {
+                        updatedAt.textContent = result.updated_at;
                     }
-                    statusText.textContent = 'Данные обновлены';
-                    console.info('[Dashboard] Manual refresh completed', payload);
+                    statusText.textContent = result?.payload?.stale ? 'Данные устарели' : 'Данные обновлены';
+                    console.info('[Dashboard] Manual refresh completed', result);
                 } catch (error) {
                     statusText.textContent = 'Ошибка обновления';
                     console.error('[Dashboard] Manual refresh failed', error);
@@ -1615,18 +1645,52 @@ LANDING_TEMPLATE = """
             updateFromPayload(initialPayload);
             animateIntro();
 
-            const eventSource = new EventSource('/events');
-            eventSource.onmessage = (event) => {
-                try {
-                    const payload = JSON.parse(event.data);
-                    updateFromPayload(payload);
-                } catch (error) {
-                    console.warn('Failed to parse event', error);
+            let eventSource = null;
+            let fallbackTimer = null;
+
+            const startFallbackRefresh = () => {
+                if (fallbackTimer) return;
+                fallbackTimer = setInterval(async () => {
+                    try {
+                        const response = await fetch('/refresh', { method: 'POST' });
+                        const result = await response.json();
+                        if (result?.payload) {
+                            updateFromPayload(result.payload);
+                        }
+                    } catch (error) {
+                        console.warn('[Dashboard] Fallback refresh failed', error);
+                    }
+                }, 30000);
+            };
+
+            const stopFallbackRefresh = () => {
+                if (fallbackTimer) {
+                    clearInterval(fallbackTimer);
+                    fallbackTimer = null;
                 }
             };
-            eventSource.onerror = (event) => {
-                console.warn('[Dashboard] EventSource error', event);
+
+            const startEventSource = () => {
+                if (eventSource) {
+                    eventSource.close();
+                }
+                eventSource = new EventSource('/events');
+                eventSource.onmessage = (event) => {
+                    try {
+                        const payload = JSON.parse(event.data);
+                        updateFromPayload(payload);
+                        stopFallbackRefresh();
+                    } catch (error) {
+                        console.warn('Failed to parse event', error);
+                    }
+                };
+                eventSource.onerror = (event) => {
+                    console.warn('[Dashboard] EventSource error', event);
+                    startFallbackRefresh();
+                };
             };
+
+            startEventSource();
         </script>
     </body>
 </html>
@@ -1690,17 +1754,26 @@ async def broadcast_event(cache: Dict[str, Any]) -> None:
 
 async def refresh_cache(reason: str) -> Optional[Dict[str, Any]]:
     async with UPDATE_LOCK:
+        existing_cache = await anyio.to_thread.run_sync(read_cache)
         try:
             logger.info("Refreshing cache: %s", reason)
             orders = await anyio.to_thread.run_sync(fetch_customer_orders)
             cache = await anyio.to_thread.run_sync(build_cache_from_orders, orders)
+            if cache_is_valid(cache):
+                await anyio.to_thread.run_sync(write_cache, cache)
+                log_stats(cache)
+                await broadcast_event(cache)
+                logger.info("Cache refreshed: %s", reason)
+                return cache
+            if existing_cache and cache_is_valid(existing_cache):
+                logger.warning("Refresh produced empty cache; keeping existing data")
+                return existing_cache
             await anyio.to_thread.run_sync(write_cache, cache)
-            log_stats(cache)
-            await broadcast_event(cache)
-            logger.info("Cache refreshed: %s", reason)
             return cache
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to refresh cache: %s", exc)
+            if existing_cache and cache_is_valid(existing_cache):
+                return existing_cache
             return None
 
 
@@ -1780,10 +1853,12 @@ async def refresh() -> ORJSONResponse:
     cache = await refresh_cache("manual")
     if not cache:
         cache = await anyio.to_thread.run_sync(read_cache)
+    payload = event_payload_dict(cache) if cache else None
     return ORJSONResponse(
         {
             "status": "ok",
             "updated_at": cache.get("updated_at") if cache else None,
+            "payload": payload,
         }
     )
 
