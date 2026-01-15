@@ -49,7 +49,7 @@ class OrderDTO(BaseModel):
     address: str
     comment: str
     link: str
-    day_key: str
+    day_key: Optional[str]
     day_label: str
 
     class Config:
@@ -465,7 +465,7 @@ def build_order_dto(order: Dict[str, Any]) -> OrderDTO:
 
     moment_raw = order.get("moment")
     moment_dt = parse_msk(moment_raw)
-    day_key = moment_dt.format("YYYY-MM-DD") if moment_dt else EMPTY_VALUE
+    day_key = moment_dt.format("YYYY-MM-DD") if moment_dt else None
     day_label = moment_dt.format("DD.MM") if moment_dt else EMPTY_VALUE
 
     sum_value = order.get("sum")
@@ -496,6 +496,8 @@ def is_cdek_state(state: str) -> bool:
 
 
 def is_new_order(state: str) -> bool:
+    if not state or state == EMPTY_VALUE:
+        return True
     state_value = state.casefold()
     return any(word in state_value for word in ["нов", "принят", "оплачен", "обработ"]) and "сдек" not in state_value
 
@@ -613,10 +615,7 @@ def cache_payload(orders: List[Dict[str, Any]], updated_at: Optional[str] = None
 
 
 def cache_is_valid(cache: Optional[Dict[str, Any]]) -> bool:
-    if not isinstance(cache, dict):
-        return False
-    orders = cache.get("orders")
-    return isinstance(orders, list) and len(orders) > 0
+    return isinstance(cache, dict) and "orders" in cache
 
 
 def ensure_cache_dir() -> None:
@@ -704,6 +703,9 @@ def build_cache_from_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             serialized_orders.append(serialize_order(build_order_dto(order)))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to serialize order %s: %s", order.get("id"), exc)
+    logger.info("[CACHE] serialized_orders=%s total_orders=%s", len(serialized_orders), len(orders))
+    if orders and not serialized_orders:
+        logger.error("ALL orders failed serialization")
     serialized_orders = dedupe_orders(serialized_orders)
     return cache_payload(serialized_orders)
 
@@ -724,6 +726,12 @@ def cache_is_stale(cache: Dict[str, Any]) -> bool:
 
 def log_stats(cache: Dict[str, Any]) -> None:
     stats = cache.get("stats", {})
+    logger.info(
+        "[CACHE] orders=%s new=%s cdek=%s",
+        len(cache.get("orders", [])),
+        stats.get("new_orders"),
+        stats.get("cdek_orders"),
+    )
     logger.info(
         "[STATS] total=%s new=%s cdek=%s updated_at=%s",
         stats.get("total_orders"),
@@ -1316,6 +1324,10 @@ LANDING_TEMPLATE = """
                 const filtered = filterByStatus(filterByPeriod(orders));
                 filteredOrders = filtered.sort((a, b) => (b.moment_ms || 0) - (a.moment_ms || 0));
                 renderIndex = 0;
+                if (!filteredOrders.length) {
+                    ordersList.innerHTML = '<div class="empty-state">Нет заказов</div>';
+                    return;
+                }
                 ordersList.innerHTML = '';
                 ordersList.appendChild(loadMoreSentinel);
                 renderNextChunk();
@@ -1448,6 +1460,7 @@ LANDING_TEMPLATE = """
                 const seriesMap = new Map(days.map((day) => [day.key, { ...day, sum: 0, count: 0 }]));
                 orders.forEach((order) => {
                     const key = order.day_key;
+                    if (!key) return;
                     if (!seriesMap.has(key)) return;
                     const entry = seriesMap.get(key);
                     entry.sum += Number(order.sum) || 0;
