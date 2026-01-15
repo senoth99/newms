@@ -61,35 +61,12 @@ def msk_now() -> pendulum.DateTime:
 
 
 def parse_msk(value: Optional[Any]) -> Optional[pendulum.DateTime]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        timestamp = float(value)
-        if timestamp > 1_000_000_000_000:
-            timestamp /= 1000
-        return pendulum.from_timestamp(timestamp, tz=MSK_TZ)
-    text = str(value).strip()
-    if not text:
+    if not value:
         return None
     try:
-        parsed = pendulum.parse(text, tz=MSK_TZ)
-        return parsed.in_timezone(MSK_TZ)
-    except pendulum.parsing.exceptions.ParserError:
-        formats = (
-            "YYYY-MM-DD HH:mm:ss.SSS",
-            "YYYY-MM-DD HH:mm:ss",
-            "YYYY-MM-DDTHH:mm:ss.SSSZZ",
-            "YYYY-MM-DDTHH:mm:ssZZ",
-            "YYYY-MM-DDTHH:mm:ss.SSSZ",
-            "YYYY-MM-DDTHH:mm:ssZ",
-        )
-        for fmt in formats:
-            try:
-                parsed = pendulum.from_format(text, fmt, tz=MSK_TZ)
-                return parsed.in_timezone(MSK_TZ)
-            except (ValueError, pendulum.parsing.exceptions.ParserError):
-                continue
-    return None
+        return pendulum.parse(str(value)).in_timezone(MSK_TZ)
+    except Exception:
+        return None
 
 
 def format_msk(value: Optional[pendulum.DateTime]) -> str:
@@ -1216,7 +1193,7 @@ LANDING_TEMPLATE = """
         <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/@studio-freight/lenis@1.0.42/bundled/lenis.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/@floating-ui/dom@1.6.7"></script>
+        <script src="https://unpkg.com/@floating-ui/dom@1.6.7/dist/floating-ui.dom.umd.min.js"></script>
         <script>
             const initialPayload = __INITIAL_PAYLOAD__;
             let currentPayload = initialPayload;
@@ -1241,15 +1218,18 @@ LANDING_TEMPLATE = """
             const chartMeta = document.getElementById('chart-meta');
             const chartEmpty = document.getElementById('chart-empty');
 
-            const lenis = new Lenis({
-                lerp: 0.12,
-                smoothWheel: true,
-            });
-            function raf(time) {
-                lenis.raf(time);
+            let lenis = null;
+            if (window.Lenis) {
+                lenis = new Lenis({
+                    lerp: 0.12,
+                    smoothWheel: true,
+                });
+                function raf(time) {
+                    lenis.raf(time);
+                    requestAnimationFrame(raf);
+                }
                 requestAnimationFrame(raf);
             }
-            requestAnimationFrame(raf);
 
             const animateIntro = () => {
                 gsap.from('.hero-panel', { opacity: 0, y: 20, duration: 0.6, stagger: 0.12 });
@@ -1303,7 +1283,10 @@ LANDING_TEMPLATE = """
                     const orderTime = order.moment_ms || 0;
                     if (!orderTime) {
                         const dayKey = order.day_key;
-                        return dayKey && recentDayKeys.has(dayKey);
+                        if (!dayKey) {
+                            return true;
+                        }
+                        return recentDayKeys.has(dayKey);
                     }
                     if (activeFilters.period === 'today') {
                         return orderTime >= todayStart;
@@ -1413,6 +1396,10 @@ LANDING_TEMPLATE = """
 
             const showTooltip = (target, text) => {
                 if (!text) return;
+                if (!window.FloatingUIDOM) {
+                    console.warn('[Dashboard] FloatingUI not loaded');
+                    return;
+                }
                 tooltip.textContent = text;
                 tooltip.classList.add('visible');
                 window.FloatingUIDOM.computePosition(target, tooltip, {
@@ -1425,6 +1412,10 @@ LANDING_TEMPLATE = """
 
             const showTooltipAt = (x, y, text) => {
                 if (!text) return;
+                if (!window.FloatingUIDOM) {
+                    console.warn('[Dashboard] FloatingUI not loaded');
+                    return;
+                }
                 tooltip.textContent = text;
                 tooltip.classList.add('visible');
                 const virtualEl = {
