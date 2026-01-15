@@ -575,7 +575,45 @@ def serialize_order(dto: OrderDTO) -> Dict[str, Any]:
     return dto.model_dump()
 
 
-def stats_from_orders(orders: Iterable[Dict[str, Any]]) -> Dict[str, int]:
+def order_moment_ms(order: Dict[str, Any]) -> int:
+    raw = order.get("moment_ms")
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    moment = parse_msk(order.get("moment"))
+    if moment:
+        return int(moment.int_timestamp * 1000)
+    day_key = order.get("day_key")
+    if day_key:
+        parsed = parse_msk(f"{day_key} 00:00:00")
+        if parsed:
+            return int(parsed.int_timestamp * 1000)
+    return 0
+
+
+def weekly_sales_stats(orders: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    week_start = msk_day_start().subtract(days=6)
+    week_start_ms = int(week_start.int_timestamp * 1000)
+    stats = {
+        "new_orders": {"count": 0, "sum": 0},
+        "cdek_orders": {"count": 0, "sum": 0},
+    }
+    for order in orders:
+        moment_ms = order_moment_ms(order)
+        if moment_ms and moment_ms < week_start_ms:
+            continue
+        state = str(order.get("state") or "")
+        sum_value = order.get("sum")
+        sum_amount = int(sum_value) if isinstance(sum_value, (int, float)) else 0
+        if is_cdek_state(state):
+            stats["cdek_orders"]["count"] += 1
+            stats["cdek_orders"]["sum"] += sum_amount
+        elif is_new_order(state):
+            stats["new_orders"]["count"] += 1
+            stats["new_orders"]["sum"] += sum_amount
+    return stats
+
+
+def stats_from_orders(orders: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     stats = {"new_orders": 0, "cdek_orders": 0, "total_orders": 0}
     for order in orders:
         stats["total_orders"] += 1
@@ -584,6 +622,7 @@ def stats_from_orders(orders: Iterable[Dict[str, Any]]) -> Dict[str, int]:
             stats["cdek_orders"] += 1
         elif is_new_order(state):
             stats["new_orders"] += 1
+    stats["weekly_sales"] = weekly_sales_stats(orders)
     return stats
 
 
@@ -855,11 +894,69 @@ LANDING_TEMPLATE = """
                 box-shadow: 0 12px 24px rgba(76, 255, 178, 0.2);
                 transform: translateY(-1px);
             }
+            .store-button {
+                border: 1px solid rgba(76, 255, 178, 0.3);
+                color: var(--matte-white);
+                padding: 10px 18px;
+                border-radius: 999px;
+                text-decoration: none;
+                font-weight: 600;
+                font-size: 13px;
+                background: rgba(7, 15, 12, 0.6);
+                transition: box-shadow 0.2s ease, transform 0.2s ease;
+            }
+            .store-button:hover {
+                box-shadow: 0 12px 24px rgba(76, 255, 178, 0.2);
+                transform: translateY(-1px);
+            }
             .kpi-row {
                 margin-top: 24px;
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
                 gap: 18px;
+            }
+            .weekly-row {
+                margin-top: 18px;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                gap: 18px;
+            }
+            .weekly-card {
+                background: var(--matte-surface);
+                border-radius: 18px;
+                padding: 20px 24px;
+                border: 1px solid var(--matte-border);
+                display: grid;
+                gap: 12px;
+            }
+            .weekly-title {
+                font-size: 12px;
+                letter-spacing: 0.2em;
+                text-transform: uppercase;
+                color: var(--matte-muted);
+            }
+            .weekly-metrics {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                gap: 12px;
+            }
+            .weekly-metric {
+                background: rgba(7, 12, 9, 0.7);
+                border-radius: 14px;
+                padding: 12px 14px;
+                border: 1px solid rgba(247, 247, 245, 0.08);
+            }
+            .weekly-label {
+                font-size: 11px;
+                color: var(--matte-muted);
+                text-transform: uppercase;
+                letter-spacing: 0.12em;
+            }
+            .weekly-value {
+                margin-top: 6px;
+                font-size: 20px;
+                font-weight: 600;
+                color: var(--matte-white);
             }
             .kpi-card {
                 background: var(--matte-surface);
@@ -942,6 +1039,7 @@ LANDING_TEMPLATE = """
                 grid-template-columns: 140px 160px 140px 180px 150px 180px 160px 140px 1.4fr 140px 1fr 120px;
                 align-items: center;
                 column-gap: 18px;
+                min-width: 0;
             }
             .list-header {
                 padding: 16px 20px;
@@ -959,19 +1057,22 @@ LANDING_TEMPLATE = """
                 display: flex;
                 flex-direction: column;
             }
+            .order-card {
+                border-bottom: 1px solid rgba(247, 247, 245, 0.06);
+                background: rgba(7, 12, 9, 0.88);
+            }
+            .order-card:last-child {
+                border-bottom: none;
+            }
             .order-row {
                 padding: 12px 20px;
-                border-bottom: 1px solid rgba(247, 247, 245, 0.06);
                 min-height: 72px;
-                background: rgba(7, 12, 9, 0.88);
                 transition: background 0.2s ease, box-shadow 0.2s ease;
+                cursor: pointer;
             }
             .order-row:hover {
                 background: rgba(10, 18, 14, 0.92);
                 box-shadow: inset 0 0 0 1px rgba(76, 255, 178, 0.12);
-            }
-            .order-row:last-child {
-                border-bottom: none;
             }
             .order-row.new {
                 box-shadow: inset 0 0 0 1px rgba(76, 255, 178, 0.2);
@@ -983,15 +1084,55 @@ LANDING_TEMPLATE = """
                 overflow: hidden;
                 text-overflow: ellipsis;
                 white-space: nowrap;
+                min-width: 0;
             }
             .order-cell.primary {
                 color: var(--matte-white);
                 font-weight: 600;
             }
+            .order-cell.wrap {
+                white-space: normal;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                word-break: break-word;
+            }
             .order-cell.link a {
                 color: var(--matte-green);
                 text-decoration: none;
                 font-weight: 600;
+            }
+            .order-detail {
+                padding: 0 20px 16px;
+                display: none;
+            }
+            .order-card.expanded .order-detail {
+                display: block;
+            }
+            .order-detail-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 12px;
+                background: rgba(7, 12, 9, 0.7);
+                border-radius: 16px;
+                border: 1px solid rgba(247, 247, 245, 0.08);
+                padding: 16px;
+            }
+            .order-detail-item {
+                display: grid;
+                gap: 6px;
+            }
+            .order-detail-label {
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.12em;
+                color: var(--matte-muted);
+            }
+            .order-detail-value {
+                font-size: 13px;
+                color: var(--matte-white);
+                line-height: 1.4;
+                word-break: break-word;
             }
             .status-badge {
                 display: inline-flex;
@@ -1123,6 +1264,9 @@ LANDING_TEMPLATE = """
                         <span>Обновлено: <strong id="updated-at">__UPDATED_AT__</strong></span>
                         <span class="status-pill">Статус: <strong id="status-text">__STATUS_TEXT__</strong></span>
                         <button class="refresh-button" id="refresh-button" type="button">Обновить</button>
+                        <a class="store-button" href="https://online.moysklad.ru/app/" target="_blank" rel="noreferrer">
+                            Перейти в МойСклад
+                        </a>
                     </div>
                 </div>
             </section>
@@ -1135,6 +1279,35 @@ LANDING_TEMPLATE = """
                 <div class="kpi-card" id="kpi-cdek-orders">
                     <div class="kpi-value" id="cdek-orders-count">__CDEK_ORDERS__</div>
                     <div class="kpi-label">Отправлено СДЭК</div>
+                </div>
+            </div>
+
+            <div class="weekly-row">
+                <div class="weekly-card">
+                    <div class="weekly-title">Новые заказы • 7 дней</div>
+                    <div class="weekly-metrics">
+                        <div class="weekly-metric">
+                            <div class="weekly-label">Кол-во продаж</div>
+                            <div class="weekly-value" id="weekly-new-count">0</div>
+                        </div>
+                        <div class="weekly-metric">
+                            <div class="weekly-label">Сумма продаж</div>
+                            <div class="weekly-value" id="weekly-new-sum">0</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="weekly-card">
+                    <div class="weekly-title">Собран СДЭК • 7 дней</div>
+                    <div class="weekly-metrics">
+                        <div class="weekly-metric">
+                            <div class="weekly-label">Кол-во продаж</div>
+                            <div class="weekly-value" id="weekly-cdek-count">0</div>
+                        </div>
+                        <div class="weekly-metric">
+                            <div class="weekly-label">Сумма продаж</div>
+                            <div class="weekly-value" id="weekly-cdek-sum">0</div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1217,6 +1390,10 @@ LANDING_TEMPLATE = """
             const tooltip = document.getElementById('tooltip');
             const chartMeta = document.getElementById('chart-meta');
             const chartEmpty = document.getElementById('chart-empty');
+            const weeklyNewCount = document.getElementById('weekly-new-count');
+            const weeklyNewSum = document.getElementById('weekly-new-sum');
+            const weeklyCdekCount = document.getElementById('weekly-cdek-count');
+            const weeklyCdekSum = document.getElementById('weekly-cdek-sum');
 
             let lenis = null;
             if (window.Lenis) {
@@ -1332,9 +1509,21 @@ LANDING_TEMPLATE = """
                     .replace(/'/g, '&#39;');
             };
 
+            const formatMoney = (value) => {
+                const number = Number(value) || 0;
+                const formatted = new Intl.NumberFormat('ru-RU', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                }).format(number / 100);
+                return `${formatted} руб.`;
+            };
+
             const renderOrderRow = (order, highlightedIds) => {
+                const card = document.createElement('div');
+                card.className = 'order-card';
                 const row = document.createElement('div');
                 row.className = `order-row ${isNewOrder(order.state) ? 'new' : ''}`;
+                row.dataset.orderId = order.id || '';
                 if (highlightedIds.has(order.id)) {
                     gsap.fromTo(
                         row,
@@ -1355,12 +1544,68 @@ LANDING_TEMPLATE = """
                     <div class="order-cell">${escapeHtml(order.email || '')}</div>
                     <div class="order-cell">${escapeHtml(order.delivery_method || '')}</div>
                     <div class="order-cell">${escapeHtml(order.city || '')}</div>
-                    <div class="order-cell" data-tooltip="${address}">${address}</div>
+                    <div class="order-cell wrap" data-tooltip="${address}">${address}</div>
                     <div class="order-cell">${escapeHtml(order.sum_display || '')}</div>
-                    <div class="order-cell" data-tooltip="${comment}">${comment}</div>
+                    <div class="order-cell wrap" data-tooltip="${comment}">${comment}</div>
                     <div class="order-cell link"><a href="${link}" target="_blank" rel="noreferrer">Открыть</a></div>
                 `;
-                return row;
+                const detail = document.createElement('div');
+                detail.className = 'order-detail';
+                detail.innerHTML = `
+                    <div class="order-detail-grid">
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Кол-во продаж</div>
+                            <div class="order-detail-value">1</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Сумма продаж</div>
+                            <div class="order-detail-value">${escapeHtml(order.sum_display || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Статус</div>
+                            <div class="order-detail-value">${escapeHtml(order.state || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Создан</div>
+                            <div class="order-detail-value">${escapeHtml(order.moment || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Получатель</div>
+                            <div class="order-detail-value">${escapeHtml(order.recipient || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Телефон</div>
+                            <div class="order-detail-value">${escapeHtml(order.phone || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Email</div>
+                            <div class="order-detail-value">${escapeHtml(order.email || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Доставка</div>
+                            <div class="order-detail-value">${escapeHtml(order.delivery_method || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Город</div>
+                            <div class="order-detail-value">${escapeHtml(order.city || '')}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Адрес</div>
+                            <div class="order-detail-value">${address || '—'}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Комментарий</div>
+                            <div class="order-detail-value">${comment || '—'}</div>
+                        </div>
+                        <div class="order-detail-item">
+                            <div class="order-detail-label">Ссылка</div>
+                            <div class="order-detail-value"><a href="${link}" target="_blank" rel="noreferrer">Открыть заказ</a></div>
+                        </div>
+                    </div>
+                `;
+                card.appendChild(row);
+                card.appendChild(detail);
+                return card;
             };
 
             const renderNextChunk = () => {
@@ -1450,6 +1695,15 @@ LANDING_TEMPLATE = """
                 }
             });
 
+            ordersList.addEventListener('click', (event) => {
+                const row = event.target.closest('.order-row');
+                if (!row) return;
+                if (event.target.closest('a')) return;
+                const card = row.closest('.order-card');
+                if (!card) return;
+                card.classList.toggle('expanded');
+            });
+
             let salesChart = null;
 
             const buildSeriesFromOrders = (orders, days) => {
@@ -1471,10 +1725,15 @@ LANDING_TEMPLATE = """
                 const series = buildSeriesFromOrders(orders, days);
                 const labels = series.map((item) => item.label);
                 const counts = series.map((item) => item.count);
+                const sums = series.map((item) => item.sum);
                 const totalCount = counts.reduce((acc, value) => acc + value, 0);
+                const totalSum = sums.reduce((acc, value) => acc + value, 0);
                 const maxValue = Math.max(...counts, 0);
                 if (chartMeta) {
-                    chartMeta.textContent = totalCount > 0 ? `Всего ${totalCount} заказов` : 'Нет данных';
+                    chartMeta.textContent =
+                        totalCount > 0
+                            ? `Всего ${totalCount} заказов • ${formatMoney(totalSum)}`
+                            : 'Нет данных';
                 }
                 if (chartEmpty) {
                     chartEmpty.classList.toggle('visible', totalCount === 0);
@@ -1529,10 +1788,11 @@ LANDING_TEMPLATE = """
                         }
                         const point = points[0];
                         const count = series[point.index]?.count || 0;
+                        const sum = series[point.index]?.sum || 0;
                         showTooltipAt(
                             event.clientX,
                             event.clientY,
-                            `${labels[point.index]} • ${count} заказов`
+                            `${labels[point.index]} • ${count} заказов • ${formatMoney(sum)}`
                         );
                     });
                     salesChart.canvas.addEventListener('mouseleave', hideTooltip);
@@ -1547,10 +1807,24 @@ LANDING_TEMPLATE = """
             const updateKpi = (payload) => {
                 const newCount = payload.stats?.new_orders ?? 0;
                 const cdekCount = payload.stats?.cdek_orders ?? 0;
+                const weeklyNew = payload.stats?.weekly_sales?.new_orders || {};
+                const weeklyCdek = payload.stats?.weekly_sales?.cdek_orders || {};
                 const prevNew = Number(newOrdersCount.textContent || 0);
                 const prevCdek = Number(cdekOrdersCount.textContent || 0);
                 newOrdersCount.textContent = newCount;
                 cdekOrdersCount.textContent = cdekCount;
+                if (weeklyNewCount) {
+                    weeklyNewCount.textContent = weeklyNew.count ?? 0;
+                }
+                if (weeklyNewSum) {
+                    weeklyNewSum.textContent = formatMoney(weeklyNew.sum ?? 0);
+                }
+                if (weeklyCdekCount) {
+                    weeklyCdekCount.textContent = weeklyCdek.count ?? 0;
+                }
+                if (weeklyCdekSum) {
+                    weeklyCdekSum.textContent = formatMoney(weeklyCdek.sum ?? 0);
+                }
                 updatedAt.textContent = payload.updated_at || '';
                 statusText.textContent = payload.stale ? 'Данные устарели' : 'Данные обновлены';
                 if (newCount > prevNew) {
@@ -1733,6 +2007,7 @@ def render_landing_page(cache: Optional[Dict[str, Any]]) -> str:
                 "new_orders": int(stats.get("new_orders", 0)),
                 "cdek_orders": int(stats.get("cdek_orders", 0)),
                 "total_orders": int(stats.get("total_orders", 0)),
+                "weekly_sales": stats.get("weekly_sales", {}),
             },
             "orders": orders,
             "stale": stale,
