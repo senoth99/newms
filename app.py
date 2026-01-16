@@ -19,6 +19,7 @@ app = FastAPI(title="MoySklad Telegram Notifier")
 
 CACHE_PATH = "/tmp/orders_cache.json"
 CACHE_TTL_SECONDS = 300
+NOTIFICATION_DEDUP_TTL_SECONDS = 300
 MSK_TZ = pendulum.timezone("Europe/Moscow")
 EMPTY_VALUE = "—"
 
@@ -26,8 +27,10 @@ CACHE_LOCK = threading.Lock()
 ENTITY_CACHE_LOCK = threading.Lock()
 UPDATE_LOCK = asyncio.Lock()
 SUBSCRIBERS_LOCK = asyncio.Lock()
+NOTIFICATION_LOCK = threading.Lock()
 SUBSCRIBERS: List[asyncio.Queue[str]] = []
 ENTITY_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+NOTIFICATION_CACHE: Dict[str, Dict[str, Any]] = {}
 
 logger = logging.getLogger("moysklad")
 logging.basicConfig(level=logging.INFO)
@@ -530,7 +533,6 @@ def build_message(order: Dict[str, Any]) -> str:
         "\n"
         "Состав заказа:\n"
         f"{positions_text}\n\n"
-        f"Сумма заказа: {dto.sum_display}\n\n"
         f"Комментарий: {dto.comment}\n"
         f"Создан: {dto.moment}\n"
         f"Ссылка: {dto.link}"
@@ -606,6 +608,31 @@ def weekly_sales_stats(orders: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, 
             stats["new_orders"]["count"] += 1
             stats["new_orders"]["sum"] += sum_amount
     return stats
+
+
+def notification_key(order: Dict[str, Any]) -> str:
+    order_id = str(order.get("id") or "")
+    if order_id:
+        return order_id
+    return f"{order.get('name') or ''}-{order.get('moment') or ''}"
+
+
+def should_send_notification(order: Dict[str, Any], state_name: Optional[str] = None) -> bool:
+    key = notification_key(order)
+    if not key:
+        return True
+    state_name = state_name or get_state_name(order)
+    now = msk_now().int_timestamp
+    cutoff = now - NOTIFICATION_DEDUP_TTL_SECONDS
+    with NOTIFICATION_LOCK:
+        expired_keys = [cached_key for cached_key, entry in NOTIFICATION_CACHE.items() if entry["sent_at"] < cutoff]
+        for expired_key in expired_keys:
+            NOTIFICATION_CACHE.pop(expired_key, None)
+        entry = NOTIFICATION_CACHE.get(key)
+        if entry and entry["state"] == state_name and entry["sent_at"] >= cutoff:
+            return False
+        NOTIFICATION_CACHE[key] = {"state": state_name, "sent_at": now}
+    return True
 
 
 def stats_from_orders(orders: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2101,6 +2128,10 @@ async def process_webhook_event(href: str) -> None:
             message = await anyio.to_thread.run_sync(build_cdek_message, order)
         else:
             message = await anyio.to_thread.run_sync(build_message, order)
+        should_send = await anyio.to_thread.run_sync(should_send_notification, order, state_name)
+        if not should_send:
+            logger.info("Skipping duplicate Telegram notification for order %s", order.get("id"))
+            return
         await anyio.to_thread.run_sync(send_telegram_message, message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to send Telegram notification: %s", exc)
