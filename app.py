@@ -514,8 +514,6 @@ def build_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
     phone_display = dto.phone or EMPTY_VALUE
     email_display = dto.email or EMPTY_VALUE
-    delivery_link = attribute_value(order, "ссылка на доставку") or EMPTY_VALUE
-    track_number = attribute_value(order, "трек-номер") or EMPTY_VALUE
 
     positions_meta = order.get("positions", {}).get("meta", {}).get("href")
     positions = order.get("positions", {}).get("rows") or []
@@ -529,10 +527,7 @@ def build_message(order: Dict[str, Any]) -> str:
         f"👤 Получатель: {dto.recipient}\n"
         f"📞 Номер телефона: {phone_display}\n"
         f"📧 Email: {email_display}\n"
-        f"Способ доставки: {dto.delivery_method}\n\n"
-        f"🏠 Адрес доставки: {dto.address}\n"
-        f"Ссылка на доставку: {delivery_link}\n"
-        f"Трек-номер: {track_number}\n\n"
+        "\n"
         "Состав заказа:\n"
         f"{positions_text}\n\n"
         f"Сумма заказа: {dto.sum_display}\n\n"
@@ -545,17 +540,12 @@ def build_message(order: Dict[str, Any]) -> str:
 def build_cdek_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
     phone_display = dto.phone or EMPTY_VALUE
-    delivery_link = attribute_value(order, "ссылка на доставку") or EMPTY_VALUE
-    track_number = attribute_value(order, "трек-номер") or EMPTY_VALUE
 
     return (
         f"🚚 {dto.state}\n"
         f"ID заказа: {dto.name}\n\n"
         f"👤 Получатель: {dto.recipient}\n"
         f"📞 Номер телефона: {phone_display}\n"
-        f"🏠 Адрес доставки: {dto.address}\n"
-        f"Ссылка на доставку: {delivery_link}\n"
-        f"Трек-номер: {track_number}\n"
         f"Ссылка: {dto.link}"
     )
 
