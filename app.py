@@ -515,8 +515,7 @@ def format_positions(positions: List[Dict[str, Any]]) -> str:
 
 def build_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
-    phone_display = dto.phone or EMPTY_VALUE
-    email_display = dto.email or EMPTY_VALUE
+    state_emoji = "🏬" if dto.state == "МСК ПРОДАЖА" else "📦"
 
     positions_meta = order.get("positions", {}).get("meta", {}).get("href")
     positions = order.get("positions", {}).get("rows") or []
@@ -525,15 +524,12 @@ def build_message(order: Dict[str, Any]) -> str:
     positions_text = format_positions(positions)
 
     return (
-        f"📦 {dto.state}\n"
+        f"{state_emoji} {dto.state}\n"
         f"ID заказа: {dto.name}\n\n"
         f"👤 Получатель: {dto.recipient}\n"
-        f"📞 Номер телефона: {phone_display}\n"
-        f"📧 Email: {email_display}\n"
         "\n"
         "Состав заказа:\n"
         f"{positions_text}\n\n"
-        f"Комментарий: {dto.comment}\n"
         f"Создан: {dto.moment}\n"
         f"Ссылка: {dto.link}"
     )
@@ -541,13 +537,11 @@ def build_message(order: Dict[str, Any]) -> str:
 
 def build_cdek_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
-    phone_display = dto.phone or EMPTY_VALUE
 
     return (
         f"🚚 {dto.state}\n"
         f"ID заказа: {dto.name}\n\n"
         f"👤 Получатель: {dto.recipient}\n"
-        f"📞 Номер телефона: {phone_display}\n"
         f"Ссылка: {dto.link}"
     )
 
