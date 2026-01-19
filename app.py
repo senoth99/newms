@@ -466,7 +466,12 @@ def build_order_dto(order: Dict[str, Any]) -> OrderDTO:
     updated_raw = order.get("updated")
     created_dt = parse_msk(created_raw)
     updated_dt = parse_msk(updated_raw)
-    moment_dt = created_dt
+    moment_dt = (
+        parse_msk(order.get("moment"))
+        or parse_msk(order.get("created"))
+        or parse_msk(order.get("updated"))
+        or msk_now()
+    )
     day_key = moment_dt.format("YYYY-MM-DD") if moment_dt else None
     day_label = moment_dt.format("DD.MM") if moment_dt else EMPTY_VALUE
 
@@ -510,11 +515,12 @@ def is_new_order(state: str) -> bool:
     return any(word in state_value for word in ["нов", "принят", "оплачен", "обработ"]) and "сдек" not in state_value
 
 
-def build_created_message(order: Dict[str, Any]) -> str:
+def build_created_message(order: Dict[str, Any], event_time: pendulum.DateTime) -> str:
     dto = build_order_dto(order)
     return (
         "🆕 ЗАКАЗ СОЗДАН\n"
         f"ID: {dto.name}\n\n"
+        f"Событие: {format_msk(event_time)}\n\n"
         f"👤 Получатель: {dto.recipient}\n\n"
         f"Создан: {dto.created}\n\n"
         "Ссылка:\n"
@@ -522,11 +528,12 @@ def build_created_message(order: Dict[str, Any]) -> str:
     )
 
 
-def build_status_changed_message(order: Dict[str, Any]) -> str:
+def build_status_changed_message(order: Dict[str, Any], event_time: pendulum.DateTime) -> str:
     dto = build_order_dto(order)
     return (
         "🔄 ЗАКАЗ ОБНОВЛЁН\n"
         f"ID: {dto.name}\n\n"
+        f"Событие: {format_msk(event_time)}\n\n"
         f"Статус: {dto.state}\n\n"
         f"Обновлён: {dto.updated}\n\n"
         "Ссылка:\n"
@@ -636,18 +643,9 @@ def determine_event_type(
     order: Dict[str, Any],
     cached_order: Optional[Dict[str, Any]],
 ) -> Optional[str]:
-    created_dt = parse_msk(order.get("created"))
-    now = msk_now()
-    if created_dt:
-        if cached_order is None:
-            return ORDER_CREATED
-        if (now - created_dt).total_seconds() <= 120:
-            return ORDER_CREATED
     if cached_order is None:
-        return None
-    current_state = get_state_name(order)
-    cached_state = cached_order.get("state") or EMPTY_VALUE
-    if current_state != cached_state:
+        return ORDER_CREATED
+    if cached_order.get("state") != get_state_name(order):
         return ORDER_STATUS_CHANGED
     return None
 
@@ -2129,10 +2127,34 @@ async def process_webhook_event(href: str) -> None:
     if store_href and not order_matches_store(order, store_href):
         logger.info("Skipping order %s: store mismatch", order.get("id"))
         return
+    event_time = msk_now()
     order_id = str(order.get("id") or "")
     cache = await anyio.to_thread.run_sync(read_cache)
     cached_order = await anyio.to_thread.run_sync(find_cached_order, cache, order_id)
     event_type = await anyio.to_thread.run_sync(determine_event_type, order, cached_order)
+
+    if event_type:
+        try:
+            state_name = await anyio.to_thread.run_sync(get_state_name, order)
+            dedupe_id = order_id or str(order.get("name") or "")
+            should_send = await anyio.to_thread.run_sync(
+                should_send_notification,
+                dedupe_id,
+                event_type,
+                state_name,
+            )
+            if not should_send:
+                logger.info("Skipping duplicate Telegram notification for order %s", order.get("id"))
+            else:
+                if event_type == ORDER_CREATED:
+                    message = await anyio.to_thread.run_sync(build_created_message, order, event_time)
+                else:
+                    message = await anyio.to_thread.run_sync(build_status_changed_message, order, event_time)
+                await anyio.to_thread.run_sync(send_telegram_message, message)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to send Telegram notification: %s", exc)
+    else:
+        logger.info("Skipping Telegram notification for order %s: no relevant event", order.get("id"))
 
     try:
         order_payload = await anyio.to_thread.run_sync(lambda: serialize_order(build_order_dto(order)))
@@ -2143,30 +2165,6 @@ async def process_webhook_event(href: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to update cache for webhook: %s", exc)
         return
-
-    if not event_type:
-        logger.info("Skipping Telegram notification for order %s: no relevant event", order.get("id"))
-        return
-
-    try:
-        state_name = await anyio.to_thread.run_sync(get_state_name, order)
-        dedupe_id = order_id or str(order.get("name") or "")
-        should_send = await anyio.to_thread.run_sync(
-            should_send_notification,
-            dedupe_id,
-            event_type,
-            state_name,
-        )
-        if not should_send:
-            logger.info("Skipping duplicate Telegram notification for order %s", order.get("id"))
-            return
-        if event_type == ORDER_CREATED:
-            message = await anyio.to_thread.run_sync(build_created_message, order)
-        else:
-            message = await anyio.to_thread.run_sync(build_status_changed_message, order)
-        await anyio.to_thread.run_sync(send_telegram_message, message)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Failed to send Telegram notification: %s", exc)
 
 
 @app.on_event("startup")
