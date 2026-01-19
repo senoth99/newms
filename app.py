@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import threading
 from html import escape
 from tempfile import NamedTemporaryFile
@@ -40,6 +41,8 @@ class OrderDTO(BaseModel):
     id: str
     name: str
     state: str
+    created: str
+    updated: str
     moment: str
     moment_ms: int
     sum: int
@@ -249,7 +252,18 @@ def fetch_customer_orders(limit: int = 100, max_days: int = 7) -> List[Dict[str,
 def normalize_text(value: Optional[Any]) -> Optional[str]:
     if value is None:
         return None
-    text = str(value).strip()
+    if isinstance(value, dict):
+        for key in ("name", "value", "description", "text"):
+            if key in value and value[key]:
+                return normalize_text(value[key])
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [normalize_text(v) for v in value]
+        parts = [p for p in parts if p]
+        return ", ".join(parts) if parts else None
+    text = str(value)
+    text = text.replace("\u200b", "").replace("\ufeff", "")
+    text = re.sub(r"\s+", " ", text).strip()
     return text or None
 
 
@@ -448,8 +462,11 @@ def build_order_dto(order: Dict[str, Any]) -> OrderDTO:
         order.get("description"),
     ) or EMPTY_VALUE
 
-    moment_raw = order.get("moment")
-    moment_dt = parse_msk(moment_raw)
+    created_raw = order.get("created")
+    updated_raw = order.get("updated")
+    created_dt = parse_msk(created_raw)
+    updated_dt = parse_msk(updated_raw)
+    moment_dt = created_dt
     day_key = moment_dt.format("YYYY-MM-DD") if moment_dt else None
     day_label = moment_dt.format("DD.MM") if moment_dt else EMPTY_VALUE
 
@@ -459,6 +476,8 @@ def build_order_dto(order: Dict[str, Any]) -> OrderDTO:
         id=str(order.get("id") or ""),
         name=order.get("name") or EMPTY_VALUE,
         state=get_state_name(order),
+        created=format_msk(created_dt),
+        updated=format_msk(updated_dt),
         moment=format_msk(moment_dt),
         moment_ms=int(moment_dt.int_timestamp * 1000) if moment_dt else 0,
         sum=int(sum_value) if isinstance(sum_value, (int, float)) else 0,
@@ -491,58 +510,27 @@ def is_new_order(state: str) -> bool:
     return any(word in state_value for word in ["нов", "принят", "оплачен", "обработ"]) and "сдек" not in state_value
 
 
-def format_positions(positions: List[Dict[str, Any]]) -> str:
-    lines: List[str] = []
-    for position in positions:
-        assortment = position.get("assortment", {})
-        name = assortment.get("name")
-        if not name:
-            assortment_href = assortment.get("meta", {}).get("href")
-            if assortment_href:
-                assortment_data = fetch_entity(assortment_href)
-                if assortment_data:
-                    name = assortment_data.get("name")
-        name = name or "Товар"
-        quantity = position.get("quantity") or 0
-        if isinstance(quantity, float) and quantity.is_integer():
-            quantity = int(quantity)
-        price = format_money(position.get("price"))
-        lines.append(f"{name} - {quantity} шт. - {price} руб.")
-    if not lines:
-        return "нет позиций"
-    return "\n".join(lines)
-
-
-def build_message(order: Dict[str, Any]) -> str:
+def build_created_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
-    state_emoji = "🏬" if dto.state == "МСК ПРОДАЖА" else "📦"
-
-    positions_meta = order.get("positions", {}).get("meta", {}).get("href")
-    positions = order.get("positions", {}).get("rows") or []
-    if positions_meta and not positions:
-        positions = fetch_order_positions(positions_meta)
-    positions_text = format_positions(positions)
-
     return (
-        f"{state_emoji} {dto.state}\n"
-        f"ID заказа: {dto.name}\n\n"
-        f"👤 Получатель: {dto.recipient}\n"
-        "\n"
-        "Состав заказа:\n"
-        f"{positions_text}\n\n"
-        f"Создан: {dto.moment}\n"
-        f"Ссылка: {dto.link}"
+        "🆕 ЗАКАЗ СОЗДАН\n"
+        f"ID: {dto.name}\n\n"
+        f"👤 Получатель: {dto.recipient}\n\n"
+        f"Создан: {dto.created}\n\n"
+        "Ссылка:\n"
+        f"{dto.link}"
     )
 
 
-def build_cdek_message(order: Dict[str, Any]) -> str:
+def build_status_changed_message(order: Dict[str, Any]) -> str:
     dto = build_order_dto(order)
-
     return (
-        f"🚚 {dto.state}\n"
-        f"ID заказа: {dto.name}\n\n"
-        f"👤 Получатель: {dto.recipient}\n"
-        f"Ссылка: {dto.link}"
+        "🔄 ЗАКАЗ ОБНОВЛЁН\n"
+        f"ID: {dto.name}\n\n"
+        f"Статус: {dto.state}\n\n"
+        f"Обновлён: {dto.updated}\n\n"
+        "Ссылка:\n"
+        f"{dto.link}"
     )
 
 
@@ -569,6 +557,12 @@ def order_moment_ms(order: Dict[str, Any]) -> int:
     raw = order.get("moment_ms")
     if isinstance(raw, (int, float)):
         return int(raw)
+    created = parse_msk(order.get("created"))
+    if created:
+        return int(created.int_timestamp * 1000)
+    updated = parse_msk(order.get("updated"))
+    if updated:
+        return int(updated.int_timestamp * 1000)
     moment = parse_msk(order.get("moment"))
     if moment:
         return int(moment.int_timestamp * 1000)
@@ -604,29 +598,58 @@ def weekly_sales_stats(orders: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, 
     return stats
 
 
-def notification_key(order: Dict[str, Any]) -> str:
-    order_id = str(order.get("id") or "")
-    if order_id:
-        return order_id
-    return f"{order.get('name') or ''}-{order.get('moment') or ''}"
+ORDER_CREATED = "ORDER_CREATED"
+ORDER_STATUS_CHANGED = "ORDER_STATUS_CHANGED"
 
 
-def should_send_notification(order: Dict[str, Any], state_name: Optional[str] = None) -> bool:
-    key = notification_key(order)
-    if not key:
+def notification_key(order_id: str, event_type: str, state_name: str) -> str:
+    return f"{order_id}:{event_type}:{state_name}"
+
+
+def should_send_notification(order_id: str, event_type: str, state_name: str) -> bool:
+    if not order_id:
         return True
-    state_name = state_name or get_state_name(order)
     now = msk_now().int_timestamp
     cutoff = now - NOTIFICATION_DEDUP_TTL_SECONDS
+    key = notification_key(order_id, event_type, state_name)
     with NOTIFICATION_LOCK:
         expired_keys = [cached_key for cached_key, entry in NOTIFICATION_CACHE.items() if entry["sent_at"] < cutoff]
         for expired_key in expired_keys:
             NOTIFICATION_CACHE.pop(expired_key, None)
         entry = NOTIFICATION_CACHE.get(key)
-        if entry and entry["state"] == state_name and entry["sent_at"] >= cutoff:
+        if entry and entry["sent_at"] >= cutoff:
             return False
-        NOTIFICATION_CACHE[key] = {"state": state_name, "sent_at": now}
+        NOTIFICATION_CACHE[key] = {"sent_at": now}
     return True
+
+
+def find_cached_order(cache: Optional[Dict[str, Any]], order_id: str) -> Optional[Dict[str, Any]]:
+    if not cache or not order_id:
+        return None
+    for existing in cache.get("orders", []):
+        if existing.get("id") == order_id:
+            return existing
+    return None
+
+
+def determine_event_type(
+    order: Dict[str, Any],
+    cached_order: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    created_dt = parse_msk(order.get("created"))
+    now = msk_now()
+    if created_dt:
+        if cached_order is None:
+            return ORDER_CREATED
+        if (now - created_dt).total_seconds() <= 120:
+            return ORDER_CREATED
+    if cached_order is None:
+        return None
+    current_state = get_state_name(order)
+    cached_state = cached_order.get("state") or EMPTY_VALUE
+    if current_state != cached_state:
+        return ORDER_STATUS_CHANGED
+    return None
 
 
 def stats_from_orders(orders: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2106,6 +2129,10 @@ async def process_webhook_event(href: str) -> None:
     if store_href and not order_matches_store(order, store_href):
         logger.info("Skipping order %s: store mismatch", order.get("id"))
         return
+    order_id = str(order.get("id") or "")
+    cache = await anyio.to_thread.run_sync(read_cache)
+    cached_order = await anyio.to_thread.run_sync(find_cached_order, cache, order_id)
+    event_type = await anyio.to_thread.run_sync(determine_event_type, order, cached_order)
 
     try:
         order_payload = await anyio.to_thread.run_sync(lambda: serialize_order(build_order_dto(order)))
@@ -2115,17 +2142,28 @@ async def process_webhook_event(href: str) -> None:
         await broadcast_event(cache)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to update cache for webhook: %s", exc)
+        return
+
+    if not event_type:
+        logger.info("Skipping Telegram notification for order %s: no relevant event", order.get("id"))
+        return
 
     try:
         state_name = await anyio.to_thread.run_sync(get_state_name, order)
-        if is_cdek_state(state_name):
-            message = await anyio.to_thread.run_sync(build_cdek_message, order)
-        else:
-            message = await anyio.to_thread.run_sync(build_message, order)
-        should_send = await anyio.to_thread.run_sync(should_send_notification, order, state_name)
+        dedupe_id = order_id or str(order.get("name") or "")
+        should_send = await anyio.to_thread.run_sync(
+            should_send_notification,
+            dedupe_id,
+            event_type,
+            state_name,
+        )
         if not should_send:
             logger.info("Skipping duplicate Telegram notification for order %s", order.get("id"))
             return
+        if event_type == ORDER_CREATED:
+            message = await anyio.to_thread.run_sync(build_created_message, order)
+        else:
+            message = await anyio.to_thread.run_sync(build_status_changed_message, order)
         await anyio.to_thread.run_sync(send_telegram_message, message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to send Telegram notification: %s", exc)
